@@ -270,6 +270,11 @@ class CLIPGradCAM(GradCAM):
         gradients = self.gradients
         activations = self.activations
         
+        # MPS compatibility: move to CPU for processing
+        if self.device == "mps":
+            gradients = gradients.cpu()
+            activations = activations.cpu()
+        
         if activations.dim() == 3:  # [batch, seq_len, dim]
             # Reshape to spatial format (approximate)
             b, n, c = activations.shape
@@ -283,18 +288,22 @@ class CLIPGradCAM(GradCAM):
             activations = activations.reshape(b, h, w, c).permute(0, 3, 1, 2)
             gradients = gradients.reshape(b, h, w, c).permute(0, 3, 1, 2)
         
-        # Compute weights
+        # Compute weights (on CPU for MPS compatibility)
         weights = gradients.mean(dim=(2, 3), keepdim=True)
         
         # Weighted combination
         cam = (weights * activations).sum(dim=1, keepdim=True)
-        cam = F.relu(cam)
+        
+        # ReLU (use torch.clamp for MPS compatibility)
+        cam = torch.clamp(cam, min=0)
         
         # Normalize
-        cam = cam - cam.min()
-        cam = cam / (cam.max() + 1e-8)
+        cam_min = cam.min()
+        cam_max = cam.max()
+        if cam_max > cam_min:
+            cam = (cam - cam_min) / (cam_max - cam_min + 1e-8)
         
-        return cam.squeeze().cpu().numpy()
+        return cam.squeeze().numpy()
 
 
 def main():
@@ -306,7 +315,7 @@ def main():
     config = Config()
     
     # Check for processed images
-    from data.data_preprocessing import DataPreprocessor
+    from data_preprocessing import DataPreprocessor
     preprocessor = DataPreprocessor()
     
     processed_dir = config.PROCESSED_DATA_DIR
@@ -325,7 +334,7 @@ def main():
         clip_model, _ = clip.load("ViT-B/32", device=config.DEVICE)
         
         # Initialize CLIP embedder
-        from embeddings.clip_embedder import CLIPEmbedder
+        from clip_embedder import CLIPEmbedder
         embedder = CLIPEmbedder()
         
         # Initialize Grad-CAM

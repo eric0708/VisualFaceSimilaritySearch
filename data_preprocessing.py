@@ -49,6 +49,13 @@ class DataPreprocessor:
         self.config = config
         self.config.create_directories()
         
+        # Optimize number of workers based on CPU count
+        import multiprocessing
+        cpu_count = multiprocessing.cpu_count()
+        # Use min(cpu_count, 8) to avoid overwhelming the system
+        self.optimal_workers = min(cpu_count, 8)
+        print(f"Using {self.optimal_workers} workers for data loading (CPU count: {cpu_count})")
+        
     def download_lfw(self) -> str:
         """Download LFW dataset"""
         print("Downloading LFW dataset...")
@@ -172,12 +179,18 @@ class DataPreprocessor:
             batch_size = self.config.BATCH_SIZE
             
         dataset = FaceDataset(image_paths, transform=transform)
+        
+        # Pin memory if GPU is available for faster data transfer
+        pin_memory = self.config.DEVICE in ['cuda', 'mps']
+        
         dataloader = DataLoader(
             dataset,
             batch_size=batch_size,
             shuffle=False,
-            num_workers=self.config.NUM_WORKERS,
-            pin_memory=True
+            num_workers=self.optimal_workers,
+            pin_memory=pin_memory,
+            persistent_workers=True if self.optimal_workers > 0 else False,
+            prefetch_factor=2 if self.optimal_workers > 0 else None
         )
         return dataloader
     

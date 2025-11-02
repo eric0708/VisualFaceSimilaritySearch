@@ -65,7 +65,9 @@ def visualize_top_k_results(query_path: str,
                            result_paths: List[str],
                            similarities: List[float],
                            save_path: str,
-                           k: int = 10):
+                           k: int = 10,
+                           include_heatmaps: bool = False,
+                           device: str = 'mps'):
     """
     Visualize top-k retrieval results
     
@@ -75,7 +77,22 @@ def visualize_top_k_results(query_path: str,
         similarities: List of similarity scores
         save_path: Path to save visualization
         k: Number of results to show
+        include_heatmaps: Whether to include similarity region heatmaps
+        device: Device for heatmap computation
     """
+    if include_heatmaps:
+        # Use enhanced visualization with heatmaps
+        try:
+            from similarity_heatmap import visualize_top_k_results_with_heatmaps
+            visualize_top_k_results_with_heatmaps(
+                query_path, result_paths, similarities, save_path, k=k, device=device
+            )
+            return
+        except Exception as e:
+            print(f"      Warning: Heatmap generation failed ({e}), using standard visualization")
+            # Fall back to standard visualization
+    
+    # Standard visualization (original)
     k = min(k, len(result_paths))
     
     # Create figure

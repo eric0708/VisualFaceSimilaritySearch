@@ -24,19 +24,28 @@ class CLIPEmbedder:
         
         Args:
             model_name: CLIP model variant (ViT-B/32, ViT-B/16, ViT-L/14)
-            device: Device to run model on (cuda/cpu)
+            device: Device to run model on (mps/cuda/cpu, auto-detected if None)
         """
         self.config = Config()
         self.model_name = model_name or self.config.CLIP_MODEL_NAME
         self.device = device or self.config.DEVICE
         
         print(f"Loading CLIP model: {self.model_name}")
+        print(f"Device: {self.device}")
+        
         self.model, self.preprocess = clip.load(self.model_name, device=self.device)
         self.model.eval()
+        
+        # Handle MPS-specific optimizations
+        if self.device == "mps":
+            # MPS works better with float32
+            self.model = self.model.float()
         
         # Get embedding dimension
         with torch.no_grad():
             dummy_input = torch.zeros(1, 3, 224, 224).to(self.device)
+            if self.device == "mps":
+                dummy_input = dummy_input.float()
             dummy_output = self.model.encode_image(dummy_input)
             self.embedding_dim = dummy_output.shape[1]
         
@@ -77,6 +86,9 @@ class CLIPEmbedder:
         """
         with torch.no_grad():
             images = images.to(self.device)
+            if self.device == "mps":
+                images = images.float()
+            
             embeddings = self.model.encode_image(images)
             embeddings = embeddings / embeddings.norm(dim=-1, keepdim=True)
         
@@ -245,7 +257,7 @@ def main():
     config = Config()
     
     # Check if processed images exist
-    from data.data_preprocessing import DataPreprocessor
+    from data_preprocessing import DataPreprocessor
     preprocessor = DataPreprocessor()
     
     processed_dir = config.PROCESSED_DATA_DIR

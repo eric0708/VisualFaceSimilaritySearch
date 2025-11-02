@@ -356,7 +356,7 @@ def main():
         return
     
     # Load embeddings
-    from embeddings.clip_embedder import CLIPEmbedder
+    from clip_embedder import CLIPEmbedder
     embeddings, image_paths, metadata = CLIPEmbedder.load_embeddings(embeddings_path)
     
     print(f"\nLoaded {len(embeddings)} embeddings")

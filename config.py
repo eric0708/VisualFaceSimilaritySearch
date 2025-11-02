@@ -37,9 +37,26 @@ class Config:
     HEATMAP_ALPHA = 0.4
     HEATMAP_COLORMAP = 'jet'
     
-    # Performance settings
-    USE_GPU = True
-    DEVICE = "cuda" if USE_GPU else "cpu"
+    # Performance settings - Auto-detect best available device
+    @staticmethod
+    def get_device():
+        """
+        Automatically detect and return the best available device.
+        Priority: MPS (Apple Silicon) > CUDA (NVIDIA) > CPU
+        """
+        import torch
+        
+        if torch.backends.mps.is_available():
+            print("🚀 Using MPS (Apple Silicon GPU)")
+            return "mps"
+        elif torch.cuda.is_available():
+            print(f"🚀 Using CUDA (GPU: {torch.cuda.get_device_name(0)})")
+            return "cuda"
+        else:
+            print("⚠️  Using CPU (No GPU detected)")
+            return "cpu"
+    
+    DEVICE = get_device.__func__()
     
     # Target metrics
     TARGET_TOP10_ACCURACY = 0.95
