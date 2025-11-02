@@ -171,38 +171,57 @@ class SimilarityHeatmapGenerator:
         # Extract query features once
         query_features, query_image = self.extract_patch_features(query_path)
         
-        # Create figure with 2 rows per result (original + heatmap)
-        fig = plt.figure(figsize=(20, 4 * (k + 1)))
+        # Create figure with proper aspect ratio
+        # Width: accommodate k results + query horizontally
+        # Height: 2 rows (original + heatmap)
+        fig_width = (k + 1) * 2.5  # 2.5 inches per result column
+        fig_height = 6  # 2 rows of images
+        fig = plt.figure(figsize=(fig_width, fig_height), constrained_layout=False)
         
-        # Grid: 2 rows per result + 2 for query
-        # Columns: 1 for query, k for results
-        gs = fig.add_gridspec(2 * (k + 1), k + 1, hspace=0.3, wspace=0.1)
+        from matplotlib.gridspec import GridSpec
         
-        # Query image (top-left, spans 2 rows)
-        ax_query_orig = fig.add_subplot(gs[0, 0])
-        ax_query_orig.imshow(query_image)
-        ax_query_orig.set_title('Query Image', fontsize=12, fontweight='bold')
-        ax_query_orig.axis('off')
+        # Grid: 3 rows × (k+1) columns
+        # Row 0: Headers
+        # Row 1: Original images
+        # Row 2: Heatmap overlays
+        gs = GridSpec(3, k + 1, 
+                     figure=fig,
+                     left=0.05, right=0.92,  # Reserve right 8% for colorbar
+                     top=0.92, bottom=0.08,
+                     hspace=0.3, wspace=0.15)
         
-        ax_query_heat = fig.add_subplot(gs[1, 0])
-        ax_query_heat.imshow(query_image)
-        ax_query_heat.set_title('(Reference)', fontsize=10)
-        ax_query_heat.axis('off')
+        # Query column (column 0)
+        # Header
+        ax_query_header = fig.add_subplot(gs[0, 0])
+        ax_query_header.text(0.5, 0.5, 'Query', 
+                           ha='center', va='center', fontsize=12, fontweight='bold')
+        ax_query_header.axis('off')
         
-        # Add header for results
-        for i in range(k):
-            ax_header = fig.add_subplot(gs[0, i + 1])
-            ax_header.text(0.5, 0.5, f'Result #{i+1}\nSim: {similarities[i]:.3f}',
-                          ha='center', va='center', fontsize=10, fontweight='bold')
-            ax_header.axis('off')
+        # Query image (row 1)
+        ax_query = fig.add_subplot(gs[1, 0])
+        ax_query.imshow(query_image)
+        ax_query.set_title('Reference', fontsize=9)
+        ax_query.axis('off')
+        
+        # Empty space in query column row 2
+        ax_query_empty = fig.add_subplot(gs[2, 0])
+        ax_query_empty.axis('off')
         
         # Normalize query path for comparison
         query_path_norm = os.path.normpath(os.path.abspath(query_path))
         
-        # Process each result
+        # Process each result (in columns)
         for idx in range(min(k, len(result_paths))):
             result_path = result_paths[idx]
             result_path_norm = os.path.normpath(os.path.abspath(result_path))
+            
+            col = idx + 1  # Column index (skip query column 0)
+            
+            # Header for this result
+            ax_header = fig.add_subplot(gs[0, col])
+            ax_header.text(0.5, 0.5, f'Result #{idx+1}\nSim: {similarities[idx]:.3f}',
+                          ha='center', va='center', fontsize=10, fontweight='bold')
+            ax_header.axis('off')
             
             # Check if this is the query image itself
             if query_path_norm == result_path_norm:
@@ -220,43 +239,37 @@ class SimilarityHeatmapGenerator:
             result_heatmap = self.create_heatmap_overlay(result_image, similarity_map, alpha=0.6)
             
             # Row 1: Original result image
-            ax_orig = fig.add_subplot(gs[1, idx + 1])
+            ax_orig = fig.add_subplot(gs[1, col])
             ax_orig.imshow(result_image)
             ax_orig.set_title('Original', fontsize=9)
             ax_orig.axis('off')
             
             # Row 2: Heatmap overlay
-            ax_heat = fig.add_subplot(gs[2, idx + 1])
+            ax_heat = fig.add_subplot(gs[2, col])
             ax_heat.imshow(result_heatmap)
             ax_heat.set_title('Similar Regions', fontsize=9)
             ax_heat.axis('off')
         
-        # Add colorbar legend (dynamically sized to match image rows)
-        # Calculate position based on the grid
-        # The grid spans from row 1 to row (k*2+1), we want colorbar to match
-        # Position format: [left, bottom, width, height]
+        # Add colorbar aligned with the 2 image rows (rows 1-2)
+        # Position: [left, bottom, width, height]
+        # Should span from bottom of row 1 to bottom of row 2
+        cbar_ax = fig.add_axes([0.93, 0.08, 0.015, 0.84])
         
-        # For k results, we have k*2 image rows (original + heatmap for each)
-        # Plus 1 header row = total (k*2 + 1) rows
-        # Colorbar should span the image rows (not header)
-        
-        total_rows = 2 * (k + 1)  # Total grid rows including query
-        image_rows_start = 1 / total_rows  # Skip header row
-        image_rows_height = (2 * k) / total_rows  # Height of all image rows
-        
-        cbar_ax = fig.add_axes([0.925, image_rows_start + 0.05, 0.012, image_rows_height - 0.1])
         cmap = plt.cm.jet
         norm = plt.Normalize(vmin=0, vmax=1)
-        cb = plt.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap), 
-                         cax=cbar_ax, label='Similarity')
-        cb.ax.tick_params(labelsize=8)
+        cb = plt.colorbar(
+            plt.cm.ScalarMappable(norm=norm, cmap=cmap), 
+            cax=cbar_ax,
+            label='Similarity'
+        )
+        cb.ax.tick_params(labelsize=9)
         
         plt.suptitle('Face Similarity Search with Region Highlighting', 
-                    fontsize=16, fontweight='bold', y=0.98)
+                    fontsize=14, fontweight='bold', y=0.98)
         
-        # Save
+        # Save without bbox_inches='tight' to preserve our manual layout
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.savefig(save_path, dpi=150)
         plt.close()
         
         print(f"    ✅ Saved: {os.path.basename(save_path)}")

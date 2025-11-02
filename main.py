@@ -63,30 +63,38 @@ def create_summary_grid(query_indices, image_paths, embeddings_normalized,
     """
     from PIL import Image
     import matplotlib.pyplot as plt
+    import time
     
     num_samples = len(query_indices)
-    top_k = 5  # Show top 5 for summary
+    top_k = 10  # Show top 10 for summary
     
     # Create figure with subplots
-    fig, axes = plt.subplots(num_samples, top_k + 1, figsize=(18, 3.5 * num_samples))
+    fig, axes = plt.subplots(num_samples, top_k + 1, figsize=(30, 3.5 * num_samples))
     
     if num_samples == 1:
         axes = axes.reshape(1, -1)
+    
+    # Track timing
+    search_times = []
     
     for sample_idx, query_idx in enumerate(query_indices):
         query_path = image_paths[query_idx]
         query_embedding = embeddings_normalized[query_idx]
         
-        # Compute similarities
+        # Time the similarity computation
+        start_time = time.time()
         top_indices, top_similarities = compute_similarities_func(
             query_embedding, embeddings_normalized, top_k=top_k
         )
+        search_time = (time.time() - start_time) * 1000  # Convert to milliseconds
+        search_times.append(search_time)
         
         # Plot query image
         ax = axes[sample_idx, 0]
         query_img = Image.open(query_path)
         ax.imshow(query_img)
-        ax.set_title(f'Sample {sample_idx + 1}\nQuery', fontsize=10, fontweight='bold')
+        ax.set_title(f'Sample {sample_idx + 1}\nQuery\n({search_time:.1f}ms)', 
+                    fontsize=10, fontweight='bold')
         ax.axis('off')
         
         # Plot top-k results
@@ -97,12 +105,17 @@ def create_summary_grid(query_indices, image_paths, embeddings_normalized,
             ax.set_title(f'#{result_idx + 1}\nSim: {sim:.3f}', fontsize=9)
             ax.axis('off')
     
-    plt.suptitle('Face Similarity Search - Sample Results', fontsize=16, fontweight='bold', y=0.995)
+    # Calculate average search time
+    avg_time = np.mean(search_times)
+    
+    plt.suptitle(f'Face Similarity Search - Sample Results\nAverage Search Time: {avg_time:.1f}ms ({len(image_paths)} images)', 
+                fontsize=16, fontweight='bold', y=0.995)
     plt.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close()
     
     print(f"  ✅ Summary grid saved: {os.path.basename(save_path)}")
+    print(f"  ⏱️  Average search time: {avg_time:.1f}ms per query")
 
 
 def create_embedding_comparison(query_indices, embeddings_dict, 
@@ -113,7 +126,7 @@ def create_embedding_comparison(query_indices, embeddings_dict,
     from PIL import Image
     import matplotlib.pyplot as plt
     
-    print("  Generating comparison visualizations...")
+    print(f"  Generating comparison visualizations for {len(query_indices)} samples...")
     
     clip_data = embeddings_dict['clip']
     dinov2_data = embeddings_dict['dinov2']
@@ -376,8 +389,8 @@ def run_pipeline(args):
         emb_type = list(embeddings_dict.keys())[0]
         embeddings, emb_paths, metadata = embeddings_dict[emb_type]
         
-        # Generate 5 sample searches
-        num_samples = min(5, len(emb_paths))
+        # Generate 10 sample searches
+        num_samples = min(10, len(emb_paths))
         print(f"\n{'='*70}")
         print(f"Generating {num_samples} sample searches...")
         print(f"{'='*70}")
@@ -409,6 +422,10 @@ def run_pipeline(args):
                 
                 print(f"\n  Sample {sample_num}/{num_samples}: {os.path.basename(query_path)}")
                 
+                # Time the similarity computation
+                import time
+                start_time = time.time()
+                
                 # Compute similarities
                 top_indices, top_similarities = compute_similarities(
                     query_embedding,
@@ -416,10 +433,13 @@ def run_pipeline(args):
                     top_k=10
                 )
                 
+                search_time_ms = (time.time() - start_time) * 1000  # Convert to milliseconds
+                
                 # Get paths
                 similar_paths = [paths[idx] for idx in top_indices]
                 
-                # Print top 5 for brevity
+                # Print timing and top 5 for brevity
+                print(f"  ⏱️  Search completed in {search_time_ms:.1f}ms")
                 print(f"  Top 5 matches:")
                 for i, (path, sim) in enumerate(zip(similar_paths[:5], top_similarities[:5]), 1):
                     print(f"    {i}. {os.path.basename(path):40s} | Sim: {sim:.4f}")
@@ -428,10 +448,11 @@ def run_pipeline(args):
                 sample_viz_path = os.path.join(samples_dir, f'sample_{sample_num}_results.jpg')
                 visualize_top_k_results(query_path, similar_paths, top_similarities, 
                                        sample_viz_path, k=10, include_heatmaps=False)
+                print(f"    ✅ Standard visualization saved")
                 
-                # Visualize this sample - Heatmap version
+                # Visualize this sample - Heatmap version (with region highlighting)
                 sample_heatmap_path = os.path.join(samples_dir, f'sample_{sample_num}_heatmap.jpg')
-                print(f"    Generating heatmap visualization...")
+                print(f"    🎨 Generating heatmap with region highlighting...")
                 visualize_top_k_results(query_path, similar_paths, top_similarities, 
                                        sample_heatmap_path, k=10, include_heatmaps=True,
                                        device=config.DEVICE)
@@ -447,7 +468,7 @@ def run_pipeline(args):
             print(f"     Directory: {samples_dir}")
             print(f"     Standard results: sample_1_results.jpg ... sample_{num_samples}_results.jpg")
             print(f"     Heatmap results: sample_1_heatmap.jpg ... sample_{num_samples}_heatmap.jpg")
-            print(f"     Summary: all_samples_summary.jpg")
+            print(f"     Summary: all_samples_summary.jpg (shows all {num_samples} samples)")
         
         # Create comparison if both embeddings were loaded
         if len(embeddings_dict) == 2:
@@ -481,7 +502,9 @@ def run_pipeline(args):
             print(f"  │   ├── sample_2_results.jpg")
             print(f"  │   ├── sample_2_heatmap.jpg")
             print(f"  │   ├── ...")
-            print(f"  │   └── all_samples_summary.jpg")
+            print(f"  │   ├── sample_{num_samples}_results.jpg")
+            print(f"  │   ├── sample_{num_samples}_heatmap.jpg")
+            print(f"  │   └── all_samples_summary.jpg   ({num_samples} samples × 10 results)")
         if 'dinov2' in embeddings_dict:
             print(f"  ├── dinov2/")
             print(f"  │   ├── sample_1_results.jpg      (standard)")
@@ -489,13 +512,17 @@ def run_pipeline(args):
             print(f"  │   ├── sample_2_results.jpg")
             print(f"  │   ├── sample_2_heatmap.jpg")
             print(f"  │   ├── ...")
-            print(f"  │   └── all_samples_summary.jpg")
+            print(f"  │   ├── sample_{num_samples}_results.jpg")
+            print(f"  │   ├── sample_{num_samples}_heatmap.jpg")
+            print(f"  │   └── all_samples_summary.jpg   ({num_samples} samples × 10 results)")
         if len(embeddings_dict) == 2:
             print(f"  └── comparison/")
             print(f"      ├── comparison_sample_1.jpg")
             print(f"      ├── comparison_sample_2.jpg")
-            print(f"      └── ...")
-        print(f"\n🎉 Heatmap versions show highlighted similar regions!")
+            print(f"      ├── ...")
+            print(f"      └── comparison_sample_{num_samples}.jpg")
+        print(f"\n🎉 Generated {num_samples} sample searches for each embedding type!")
+        print(f"   Heatmap versions show highlighted similar regions!")
     
     print("\n" + "="*70)
     print("PIPELINE COMPLETE!")
