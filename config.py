@@ -24,7 +24,7 @@ class Config:
     NUM_WORKERS = 4
     
     # Model settings
-    CLIP_MODEL_NAME = "ViT-B/32"  # Options: ViT-B/32, ViT-B/16, ViT-L/14
+    CLIP_MODEL_NAME = "ViT-L/14"  # Options: ViT-B/32, ViT-B/16, ViT-L/14
     DINOV2_MODEL_NAME = "dinov2_vitb14"  # Options: dinov2_vits14, dinov2_vitb14, dinov2_vitl14
     
     # FAISS settings
