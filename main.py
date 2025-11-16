@@ -268,13 +268,37 @@ def run_pipeline(args):
             save_path=dinov2_save_path
         )
         print("✅ DINOv2 embeddings complete!")
-    
-    # Step 4: SKIP FAISS - Use direct numpy search instead
-    print("\n" + "="*70)
-    print("STEP 4: SKIPPING FAISS INDEX")
-    print("Using direct numpy similarity search instead")
-    print("="*70)
-    print("✅ No indexing needed - embeddings ready for search!")
+
+    # Step 4: Build FAISS Index
+    if args.step in ['all', 'index']:
+        print("\n" + "="*70)
+        print("STEP 4: BUILDING FAISS INDEX")
+        print("="*70)
+        from faiss_indexer import FAISSIndexer
+        from clip_embedder import CLIPEmbedder
+        
+        # Load CLIP embeddings
+        clip_emb_path = os.path.join(config.EMBEDDINGS_DIR, 'clip_embeddings.h5')
+        if not os.path.exists(clip_emb_path):
+            print("CLIP embeddings not found. Run embed_clip step first.")
+            return
+        
+        embeddings, paths, metadata = CLIPEmbedder.load_embeddings(clip_emb_path)
+        
+        # Build index
+        indexer = FAISSIndexer(
+            embedding_dim=embeddings.shape[1],
+            index_type=args.index_type
+        )
+        
+        indexer.build_index(embeddings, paths)
+        
+        # Save index
+        indexer.save_index(config.FAISS_INDEX_DIR, index_name=f"clip_{args.index_type.lower()}_index")
+        
+        # Benchmark
+        indexer.benchmark(embeddings, k=10, num_queries=100)
+        print("✅ FAISS index complete!")
     
     # Step 5: Grad-CAM Visualization
     if args.step in ['all', 'gradcam']:
@@ -351,10 +375,11 @@ def run_pipeline(args):
         print("Using both CLIP and DINOv2 embeddings")
         print("="*70)
         
+        from faiss_indexer import FAISSIndexer
         from clip_embedder import CLIPEmbedder
         from dinov2_embedder import DINOv2Embedder
         from helpers import visualize_top_k_results
-        import random
+        import random, time
         
         # Load both embeddings
         embeddings_dict = {}
@@ -385,6 +410,17 @@ def run_pipeline(args):
             print("   python main_no_index.py --step embed_dinov2")
             return
         
+        # Load FAISS index
+        index_path = config.FAISS_INDEX_DIR
+        index_name = f"clip_{args.index_type.lower()}_index"
+        if not os.path.exists(os.path.join(index_path, f"{index_name}.index")):
+            print("Index not found. Run index step first.")
+            return
+        
+        indexer = FAISSIndexer.load_index(index_path, index_name)
+        print(f"🔍 Using FAISS index type: {type(indexer.index)}")
+        embedder = CLIPEmbedder(model_name=args.clip_model)
+
         # Use first available embeddings for determining samples
         emb_type = list(embeddings_dict.keys())[0]
         embeddings, emb_paths, metadata = embeddings_dict[emb_type]
@@ -399,77 +435,49 @@ def run_pipeline(args):
         total_images = len(emb_paths)
         query_indices = [int(i * total_images / num_samples) for i in range(num_samples)]
         
-        # Process each embedding type
-        for emb_name, (embeddings, paths, metadata) in embeddings_dict.items():
-            print(f"\n{'='*70}")
-            print(f"PROCESSING {emb_name.upper()} EMBEDDINGS")
-            print(f"{'='*70}")
-            
-            # Normalize embeddings
-            print("Normalizing embeddings...")
-            norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-            embeddings_normalized = embeddings / (norms + 1e-8)
-            
-            # Create results directory for this embedding type
-            samples_dir = os.path.join(config.RESULTS_DIR, 'sample_searches', emb_name)
-            os.makedirs(samples_dir, exist_ok=True)
-            print(f"Results will be saved to: {samples_dir}")
-            
-            # Process each sample
-            for sample_num, query_idx in enumerate(query_indices, 1):
-                query_path = paths[query_idx]
-                query_embedding = embeddings_normalized[query_idx]
-                
-                print(f"\n  Sample {sample_num}/{num_samples}: {os.path.basename(query_path)}")
-                
-                # Time the similarity computation
-                import time
-                start_time = time.time()
-                
-                # Compute similarities
-                top_indices, top_similarities = compute_similarities(
-                    query_embedding,
-                    embeddings_normalized,
-                    top_k=10
-                )
-                
-                search_time_ms = (time.time() - start_time) * 1000  # Convert to milliseconds
-                
-                # Get paths
-                similar_paths = [paths[idx] for idx in top_indices]
-                
-                # Print timing and top 5 for brevity
-                print(f"  ⏱️  Search completed in {search_time_ms:.1f}ms")
-                print(f"  Top 5 matches:")
-                for i, (path, sim) in enumerate(zip(similar_paths[:5], top_similarities[:5]), 1):
-                    print(f"    {i}. {os.path.basename(path):40s} | Sim: {sim:.4f}")
-                
-                # Visualize this sample - Standard version
-                sample_viz_path = os.path.join(samples_dir, f'sample_{sample_num}_results.jpg')
-                visualize_top_k_results(query_path, similar_paths, top_similarities, 
-                                       sample_viz_path, k=10, include_heatmaps=False)
-                print(f"    ✅ Standard visualization saved")
-                
-                # Visualize this sample - Heatmap version (with region highlighting)
-                sample_heatmap_path = os.path.join(samples_dir, f'sample_{sample_num}_heatmap.jpg')
-                print(f"    🎨 Generating heatmap with region highlighting...")
-                visualize_top_k_results(query_path, similar_paths, top_similarities, 
-                                       sample_heatmap_path, k=10, include_heatmaps=True,
-                                       device=config.DEVICE)
-            
-            # Create summary visualization
-            print(f"\n  Creating summary grid for {emb_name.upper()}...")
+        print(f"\nGenerating {num_samples} sample searches using FAISS...")
+        samples_dir = os.path.join(config.RESULTS_DIR, 'sample_searches', emb_type)
+        os.makedirs(samples_dir, exist_ok=True)
+
+        for sample_num, query_idx in enumerate(query_indices, 1):
+            query_path = emb_paths[query_idx]
+            query_emb = embedder.embed_image(query_path)
+
+            # ✅ Replace NumPy compute with FAISS search
+            start_time = time.time()
+            similar_paths, similarities = indexer.search(query_emb, k=10)
+            search_time_ms = (time.time() - start_time) * 1000
+
+            print(f"\n  Sample {sample_num}/{num_samples}: {os.path.basename(query_path)}")
+            print(f"  ⏱️  Search completed in {search_time_ms:.1f} ms")
+            print(f"  Top 5 matches:")
+            for i, (p, sim) in enumerate(zip(similar_paths[:5], similarities[:5]), 1):
+                print(f"    {i}. {os.path.basename(p):40s} | Sim: {sim:.4f}")
+
+            # Visualization
+            sample_viz_path = os.path.join(samples_dir, f'sample_{sample_num}_results.jpg')
+            visualize_top_k_results(query_path, similar_paths, similarities,
+                               sample_viz_path, k=10, include_heatmaps=False)
+            sample_heatmap_path = os.path.join(samples_dir, f'sample_{sample_num}_heatmap.jpg')
+            visualize_top_k_results(query_path, similar_paths, similarities,
+                               sample_heatmap_path, k=10, include_heatmaps=True,
+                               device=config.DEVICE)
+
             
             summary_path = os.path.join(samples_dir, 'all_samples_summary.jpg')
-            create_summary_grid(query_indices, paths, embeddings_normalized, 
+            create_summary_grid(query_indices, emb_paths, embeddings / (np.linalg.norm(embeddings, axis=1, keepdims=True) + 1e-8), 
                               compute_similarities, summary_path)
             
-            print(f"\n  ✅ {emb_name.upper()} complete!")
-            print(f"     Directory: {samples_dir}")
-            print(f"     Standard results: sample_1_results.jpg ... sample_{num_samples}_results.jpg")
-            print(f"     Heatmap results: sample_1_heatmap.jpg ... sample_{num_samples}_heatmap.jpg")
-            print(f"     Summary: all_samples_summary.jpg (shows all {num_samples} samples)")
+            print(f"\n✅ {emb_type.upper()} demo complete! Results in {samples_dir}")
+            # print(f"\n  ✅ {emb_name.upper()} complete!")
+            # print(f"     Directory: {samples_dir}")
+            # print(f"     Standard results: sample_1_results.jpg ... sample_{num_samples}_results.jpg")
+            # print(f"     Heatmap results: sample_1_heatmap.jpg ... sample_{num_samples}_heatmap.jpg")
+            # print(f"     Summary: all_samples_summary.jpg (shows all {num_samples} samples)")
         
+        # Visualize
+        # viz_path = os.path.join(config.RESULTS_DIR, 'demo_search_results.jpg')
+        # visualize_top_k_results(query_path, similar_paths, similarities, viz_path, k=10)
         # Create comparison if both embeddings were loaded
         if len(embeddings_dict) == 2:
             print(f"\n{'='*70}")
@@ -490,6 +498,7 @@ def run_pipeline(args):
             print(f"     Directory: {comparison_dir}")
             print(f"     Files: comparison_sample_1.jpg ... comparison_sample_{num_samples}.jpg")
         
+        print(f"✅ Demo search complete! Visualization saved to {sample_viz_path}")
         print(f"\n{'='*70}")
         print("ALL SEARCHES COMPLETE!")
         print(f"{'='*70}")
@@ -539,8 +548,10 @@ def main():
         type=str,
         default='all',
         choices=['all', 'preprocess', 'embed_clip', 'embed_dinov2', 
-                'gradcam', 'attention', 'demo'],
-        help='Pipeline step to run (note: no index step in this version)'
+                'index', 'gradcam', 'attention', 'demo'],
+        help='Pipeline step to run'
+        #         'gradcam', 'attention', 'demo'],
+        # help='Pipeline step to run (note: no index step in this version)'
     )
     
     parser.add_argument(
@@ -571,6 +582,14 @@ def main():
         default='dinov2_vitb14',
         choices=['dinov2_vits14', 'dinov2_vitb14', 'dinov2_vitl14'],
         help='DINOv2 model variant'
+    )
+
+    parser.add_argument(
+        '--index-type',
+        type=str,
+        default='Flat',
+        choices=['Flat', 'IVF', 'HNSW'],
+        help='FAISS index type'
     )
     
     args = parser.parse_args()
