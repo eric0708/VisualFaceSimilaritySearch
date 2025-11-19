@@ -50,17 +50,23 @@ class GradCAM:
         """Register forward and backward hooks"""
 
         def forward_hook(module, input, output):
-            # Save activations and register hook on the output tensor itself
+            # Save activations and ensure they require gradients
             self.activations = output
+            # Ensure activation values also need gradients for backpropagation
+            if not output.requires_grad:
+                output.requires_grad = True
 
-            # Register backward hook on the output tensor
-            def tensor_backward_hook(grad):
-                self.gradients = grad
+        def backward_hook(module, grad_input, grad_output):
+            # grad_output is a tuple, we need the first element
+            # This is the gradient flowing to the layer's output
+            self.gradients = grad_output[0]
 
-            if output.requires_grad:
-                output.register_hook(tensor_backward_hook)
-
+        # Register forward hook to target layer
         self.handlers.append(self.target_layer.register_forward_hook(forward_hook))
+        # Register backward hook to target layer
+        self.handlers.append(
+            self.target_layer.register_full_backward_hook(backward_hook)
+        )
 
     def remove_hooks(self):
         """Remove all hooks"""
@@ -102,13 +108,11 @@ class GradCAM:
         # Get gradients and activations
         gradients = self.gradients  # [1, C, H, W]
         activations = self.activations  # [1, C, H, W]
+        # Global average pooling on gradients
+        weights = gradients.mean(dim=(2, 3), keepdim=True)  # [1, C, 1, 1]
 
         # Weighted combination of activation maps
-        # Method 1: Global average pooling on gradients
-        # weights = gradients.mean(dim=(2, 3), keepdim=True)  # [1, C, 1, 1]
         # cam = (weights * activations).sum(dim=1, keepdim=True)  # [1, 1, H, W]
-
-        # Method 2: Direct element-wise multiplication (used here)
         cam = (activations * gradients).sum(dim=1, keepdim=True)
 
         # ReLU
@@ -118,8 +122,8 @@ class GradCAM:
         cam = cam - cam.min()
         cam = cam / (cam.max() + 1e-8)
 
-        # Convert to numpy
-        cam = cam.squeeze().cpu().numpy()
+        # Convert to numpy - detach from computation graph first
+        cam = cam.squeeze().detach().cpu().numpy()
 
         return cam
 
@@ -186,7 +190,8 @@ class GradCAM:
         Returns:
             Dictionary with CAMs and visualizations
         """
-        # Get reference embedding
+        # Get embeddings
+        query_emb = model_embedder.embed_image(query_image_path)
         ref_emb = model_embedder.embed_image(reference_image_path)
 
         # Prepare query image
@@ -259,56 +264,6 @@ class CLIPGradCAM(GradCAM):
         super().__init__(clip_model.visual, target_layer, device)
         self.full_model = clip_model
 
-    def reshape_transform(self, tensor, height=7, width=7):
-        """
-        Reshape transformer output to spatial format
-
-        Args:
-            tensor: transformer output (can be [seq_len, batch, dim] or [batch, seq_len, dim])
-            height: spatial height (default 7 for ViT-B/32 with 224x224 input)
-            width: spatial width
-
-        Returns:
-            Reshaped tensor [batch, dim, height, width]
-        """
-        if tensor is None:
-            return None
-
-        # Check if tensor is empty
-        if tensor.numel() == 0:
-            print("Warning: Empty tensor in reshape_transform")
-            return None
-
-        # CLIP transformer outputs [seq_len, batch, dim], need to transpose to [batch, seq_len, dim]
-        if tensor.dim() == 3:
-            # Check if format is [seq_len, batch, dim] (CLIP format)
-            if tensor.size(1) == 1 and tensor.size(0) > tensor.size(1):
-                # Transpose to [batch, seq_len, dim]
-                tensor = tensor.permute(1, 0, 2)
-
-        # Remove CLS token (first token) and reshape
-        # tensor shape: [batch, seq_len, dim]
-        result = tensor[:, 1:, :]  # Remove CLS token
-
-        # Check if result is empty after removing CLS token
-        if result.numel() == 0:
-            print(
-                f"Warning: Empty tensor after removing CLS token. Original shape: {tensor.shape}"
-            )
-            return None
-
-        # Get dimensions
-        batch_size = result.size(0)
-        dim = result.size(2)
-
-        # Reshape to [batch, height, width, dim]
-        result = result.reshape(batch_size, height, width, dim)
-
-        # Permute to [batch, dim, height, width]
-        result = result.permute(0, 3, 1, 2)
-
-        return result
-
     def generate_cam(
         self, input_image: torch.Tensor, target_embedding: torch.Tensor = None
     ) -> np.ndarray:
@@ -317,15 +272,16 @@ class CLIPGradCAM(GradCAM):
 
         Overrides parent method to handle CLIP's architecture
         """
-        # Set model to train mode to enable gradients
-        self.model.train()
+        # Use eval() mode for Grad-CAM to ensure accurate interpretability
+        self.model.eval()
 
-        # Ensure input requires grad
+        # Ensure input requires gradients for backpropagation
         input_image = input_image.to(self.device)
         if not input_image.requires_grad:
             input_image.requires_grad = True
 
         # Forward through visual encoder
+        # forward_hook will automatically populate self.activations
         output = self.full_model.encode_image(input_image)
         if target_embedding is not None:
             target_embedding = target_embedding.to(self.device)
@@ -338,105 +294,98 @@ class CLIPGradCAM(GradCAM):
         if input_image.grad is not None:
             input_image.grad.zero_()
 
-        # Backward pass
+        # Backward pass - this will trigger backward_hook and populate self.gradients
+        print(
+            f"Debug: loss value: {loss.item():.6f}, requires_grad: {loss.requires_grad}"
+        )
+        
         loss.backward()
 
-        # Set back to eval mode
-        self.model.eval()
-
-        # Get activations and gradients (both are [batch, seq_len, dim])
+        # Process activations (CLIP outputs sequence)
         gradients = self.gradients
         activations = self.activations
-
-        if gradients is None or activations is None:
-            print("Warning: Gradients or activations are None")
-            return np.zeros((224, 224), dtype=np.float32)
-
-        # Print debug info
-        print(
-            f"Debug: gradients shape: {gradients.shape}, activations shape: {activations.shape}"
-        )
-        print(
-            f"Debug: gradients device: {gradients.device}, activations device: {activations.device}"
-        )
-        print(
-            f"Debug: gradients numel: {gradients.numel()}, activations numel: {activations.numel()}"
-        )
-
         # MPS compatibility: move to CPU for processing
         if self.device == "mps":
             gradients = gradients.cpu()
             activations = activations.cpu()
 
-        # Reshape transformer output to spatial format
-        # Remove CLS token and reshape to [batch, channels, height, width]
-        activations_reshaped = self.reshape_transform(activations)
-        gradients_reshaped = self.reshape_transform(gradients)
+        if activations.dim() == 3:  # [batch, seq_len, dim]
+            b, n, c = activations.shape
+            print(f"Debug: activations shape: {activations.shape}")
+            # Handle cases where there is no CLS token and sequence length is patch_count
+            if n > 1 and int(np.sqrt(n - 1)) ** 2 == n - 1:
+                h = w = int(np.sqrt(n - 1))  # Exclude CLS token
+                activations = activations[:, 1:, :]
+                gradients = gradients[:, 1:, :]
+            else:
+                # Assume n is the total number of patches (no CLS token)
+                h = w = int(np.sqrt(n))
+                if h * w != n:
+                    print(
+                        f"Warning: Cannot reshape sequence of length {n} into a square grid. Approximating."
+                    )
+                    # Fallback for non-square grids, though it might distort visualization
+                    h, w = int(np.sqrt(n)), int(np.sqrt(n))
+                    while h * w < n:
+                        h += 1
+                    while h * w > n:
+                        w -= 1
+            # Reshape
+            if activations.numel() > 0:
+                activations = activations.reshape(b, h, w, c).permute(0, 3, 1, 2)
+                gradients = gradients.reshape(b, h, w, c).permute(0, 3, 1, 2)
+            else:
+                print(f"Warning: No activations after slicing. Creating empty tensors.")
+                # If after slicing we have no activations, create empty tensors with correct spatial dims
+                activations = torch.zeros(
+                    b, c, h, w, device=activations.device, dtype=activations.dtype
+                )
+                gradients = torch.zeros(
+                    b, c, h, w, device=gradients.device, dtype=gradients.dtype
+                )
+        # Weighted combination
+        # cam = (activations * gradients).sum(dim=1, keepdim=True)
+        weights = gradients.mean(dim=(2, 3), keepdim=True)  # [B, C, 1, 1]
 
-        if activations_reshaped is None or gradients_reshaped is None:
-            print("Warning: Failed to reshape activations or gradients")
-            return np.zeros((224, 224), dtype=np.float32)
+        # 2. 執行加權總和
+        cam = (weights * activations).sum(dim=1, keepdim=True)  # [B, 1, H, W]
 
-        # Convert to numpy for processing
-        gradients_np = gradients_reshaped[0].cpu().detach().numpy()  # [C, H, W]
-        activations_np = activations_reshaped[0].cpu().detach().numpy()  # [C, H, W]
+        # ReLU (use torch.clamp for MPS compatibility)
+        # cam = torch.clamp(cam, min=0)
 
-        # Debug: check gradients and activations statistics
-        print(
-            f"Debug: gradients_np min={gradients_np.min():.6f}, max={gradients_np.max():.6f}, mean={gradients_np.mean():.6f}"
-        )
-        print(
-            f"Debug: activations_np min={activations_np.min():.6f}, max={activations_np.max():.6f}, mean={activations_np.mean():.6f}"
-        )
-
-        # Compute weights by averaging gradients over spatial dimensions
-        weights = np.mean(gradients_np, axis=(1, 2))  # [C]
-        print(
-            f"Debug: weights min={weights.min():.6f}, max={weights.max():.6f}, mean={weights.mean():.6f}"
-        )
-
-        # Weighted combination of activations
-        cam = np.sum(
-            weights[:, np.newaxis, np.newaxis] * activations_np, axis=0
-        )  # [H, W]
-
-        # Apply ReLU
-        cam = np.maximum(cam, 0)
-        print(f"Debug: cam before normalize min={cam.min():.6f}, max={cam.max():.6f}")
-
-        # Check if cam is valid
-        if cam.size == 0 or not np.isfinite(cam).all():
-            print(
-                f"Warning: Invalid CAM generated. cam.shape: {cam.shape}, cam.size: {cam.size}"
+        # Manually resize if cam is 1x1 to avoid cv2 error
+        if cam.shape[2] == 1 and cam.shape[3] == 1:
+            if input_image.dim() == 4:
+                img_h, img_w = input_image.shape[2], input_image.shape[3]
+            else:
+                img_h, img_w = 224, 224  # Default size
+            cam = F.interpolate(
+                cam.float(),  # Convert to float32 for MPS compatibility
+                size=(img_h, img_w),
+                mode="bilinear",
+                align_corners=False,
             )
-            return np.zeros((224, 224), dtype=np.float32)
 
         # Normalize
+
+        # Add a check to prevent operating on an empty tensor
+        if cam.numel() == 0:
+            print("Warning: CAM tensor is empty. Returning a zero array.")
+            # Find the input image size to return a correctly sized empty CAM
+            if input_image.dim() == 4:
+                img_h, img_w = input_image.shape[2], input_image.shape[3]
+            else:
+                img_h, img_w = 224, 224  # Default size
+            return np.zeros((img_h, img_w), dtype=np.float32)
+
         cam_min = cam.min()
         cam_max = cam.max()
+        print(f"cam_min={cam_min.item():.6f}, cam_max={cam_max.item():.6f}")
         if cam_max > cam_min:
-            cam = (cam - cam_min) / (cam_max - cam_min)
-        else:
-            print(f"Warning: CAM has no variance (min={cam_min}, max={cam_max})")
-            cam = np.zeros_like(cam)
+            cam = (cam - cam_min) / (cam_max - cam_min + 1e-8)
 
-        # Ensure cam is in the right format for cv2.resize
-        cam = np.float32(cam)
-
-        # Check dimensions before resize
-        if len(cam.shape) != 2:
-            print(f"Warning: CAM has wrong dimensions: {cam.shape}")
-            return np.zeros((224, 224), dtype=np.float32)
-
-        # Resize to input image size
-        try:
-            cam = cv2.resize(cam, (224, 224))
-        except Exception as e:
-            print(f"Warning: cv2.resize failed: {e}")
-            print(f"cam shape: {cam.shape}, dtype: {cam.dtype}")
-            return np.zeros((224, 224), dtype=np.float32)
-
-        return cam
+        # Detach from computation graph before converting to numpy
+        return cam[0].squeeze().detach().cpu().numpy()
 
 
 def main():
@@ -448,7 +397,7 @@ def main():
     config = Config()
 
     # Check for processed images
-    from data.data_preprocessing import DataPreprocessor
+    from data_preprocessing import DataPreprocessor
 
     preprocessor = DataPreprocessor()
 
@@ -483,7 +432,7 @@ def main():
 
         save_dir = os.path.join(config.RESULTS_DIR, "gradcam_demo")
 
-        grad_cam.generate_pairwise_cam(
+        results = grad_cam.generate_pairwise_cam(
             query_path, ref_path, embedder, save_dir=save_dir
         )
 

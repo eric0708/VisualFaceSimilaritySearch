@@ -170,7 +170,7 @@ class CLIPEmbedder:
             f.attrs['embedding_dim'] = self.embedding_dim
             f.attrs['num_images'] = len(image_paths)
         
-        print(f"✅ Embeddings saved successfully!")
+        print("✅ Embeddings saved successfully!")
     
     @staticmethod
     def load_embeddings(load_path: str) -> Tuple[np.ndarray, List[str], Dict]:

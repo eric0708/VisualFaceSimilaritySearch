@@ -110,6 +110,7 @@ class SimilarityHeatmapGenerator:
         
         # Take max similarity for each query patch
         max_similarities = similarities.max(axis=1)  # [num_patches_q]
+        # max_similarities = similarities.mean(axis=1)  # [num_patches_q]
         
         # Reshape to spatial grid (14x14 for ViT)
         num_patches = len(max_similarities)

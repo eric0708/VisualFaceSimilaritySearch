@@ -4,22 +4,31 @@ Runs face similarity search pipeline WITHOUT FAISS indexing
 Uses direct numpy similarity computation instead
 """
 
+import argparse
 import os
 import sys
+import time
+
+import clip
+import matplotlib.pyplot as plt
+import numpy as np
+from PIL import Image
+
+from config import Config
+from data.data_preprocessing import DataPreprocessor
+from embeddings.clip_embedder import CLIPEmbedder
+from embeddings.dinov2_embedder import DINOv2Embedder
+from utils.helpers import visualize_top_k_results
+from visualization.attention_viz import AttentionVisualizer
+from visualization.gradcam import CLIPGradCAM
 
 # Enable MPS fallback for unsupported operations (needed for DINOv2 on Apple Silicon)
 os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
-
-import argparse
-
-import numpy as np
 
 # Add project root to Python path
 project_root = os.path.dirname(os.path.abspath(__file__))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
-
-from config import Config
 
 
 def compute_similarities(
@@ -67,11 +76,6 @@ def create_summary_grid(
         compute_similarities_func: Function to compute similarities
         save_path: Path to save the summary grid
     """
-    import time
-
-    import matplotlib.pyplot as plt
-    from PIL import Image
-
     num_samples = len(query_indices)
     top_k = 10  # Show top 10 for summary
 
@@ -138,8 +142,6 @@ def create_embedding_comparison(
     """
     Create side-by-side comparison of CLIP vs DINOv2 results
     """
-    import matplotlib.pyplot as plt
-    from PIL import Image
 
     print(f"  Generating comparison visualizations for {len(query_indices)} samples...")
 
@@ -222,7 +224,6 @@ def run_pipeline(args):
         print("\n" + "=" * 70)
         print("STEP 1: DATA PREPROCESSING")
         print("=" * 70)
-        from data.data_preprocessing import DataPreprocessor
 
         preprocessor = DataPreprocessor()
 
@@ -250,7 +251,6 @@ def run_pipeline(args):
             return
 
     # Get processed image paths
-    from data.data_preprocessing import DataPreprocessor
 
     preprocessor = DataPreprocessor()
     image_paths = preprocessor.collect_image_paths(config.PROCESSED_DATA_DIR)
@@ -264,7 +264,6 @@ def run_pipeline(args):
         print("\n" + "=" * 70)
         print("STEP 2: GENERATING CLIP EMBEDDINGS")
         print("=" * 70)
-        from embeddings.clip_embedder import CLIPEmbedder
 
         clip_embedder = CLIPEmbedder(model_name=args.clip_model)
         clip_save_path = os.path.join(config.EMBEDDINGS_DIR, "clip_embeddings.h5")
@@ -279,7 +278,6 @@ def run_pipeline(args):
         print("\n" + "=" * 70)
         print("STEP 3: GENERATING DINOV2 EMBEDDINGS")
         print("=" * 70)
-        from embeddings.dinov2_embedder import DINOv2Embedder
 
         dinov2_embedder = DINOv2Embedder(model_name=args.dinov2_model)
         dinov2_save_path = os.path.join(config.EMBEDDINGS_DIR, "dinov2_embeddings.h5")
@@ -306,11 +304,6 @@ def run_pipeline(args):
             print("Need at least 2 images for Grad-CAM demo.")
         else:
             try:
-                import clip
-
-                from embeddings.clip_embedder import CLIPEmbedder
-                from visualization.gradcam import CLIPGradCAM
-
                 # Load models
                 clip_model, _ = clip.load(args.clip_model, device=config.DEVICE)
                 embedder = CLIPEmbedder(model_name=args.clip_model)
@@ -343,9 +336,6 @@ def run_pipeline(args):
             print("Need at least 2 images for attention visualization.")
         else:
             try:
-                from embeddings.dinov2_embedder import DINOv2Embedder
-                from visualization.attention_viz import AttentionVisualizer
-
                 embedder = DINOv2Embedder(model_name=args.dinov2_model)
                 visualizer = AttentionVisualizer()
 
@@ -372,10 +362,6 @@ def run_pipeline(args):
         print("STEP 7: DEMO SIMILARITY SEARCH (5 SAMPLES)")
         print("Using both CLIP and DINOv2 embeddings")
         print("=" * 70)
-
-        from embeddings.clip_embedder import CLIPEmbedder
-        from embeddings.dinov2_embedder import DINOv2Embedder
-        from utils.helpers import visualize_top_k_results
 
         # Load both embeddings
         embeddings_dict = {}
@@ -446,9 +432,6 @@ def run_pipeline(args):
                 print(
                     f"\n  Sample {sample_num}/{num_samples}: {os.path.basename(query_path)}"
                 )
-
-                # Time the similarity computation
-                import time
 
                 start_time = time.time()
 
