@@ -28,7 +28,7 @@ class AttentionVisualizer:
                                image_path: str,
                                save_path: Optional[str] = None,
                                alpha: float = 0.5,
-                               colormap: str = 'viridis') -> np.ndarray:
+                               colormap: str = 'jet') -> np.ndarray:
         """
         Overlay attention map on image
         
@@ -37,7 +37,7 @@ class AttentionVisualizer:
             image_path: Path to original image
             save_path: Path to save visualization
             alpha: Transparency of overlay
-            colormap: Matplotlib colormap
+            colormap: Matplotlib colormap (default: jet)
             
         Returns:
             Overlayed image
@@ -51,7 +51,10 @@ class AttentionVisualizer:
         attn_resized = cv2.resize(attention_map, (w, h), interpolation=cv2.INTER_CUBIC)
         
         # Normalize
-        attn_resized = (attn_resized - attn_resized.min()) / (attn_resized.max() - attn_resized.min() + 1e-8)
+        attn_min, attn_max = attn_resized.min(), attn_resized.max()
+        print(f"Visualizing attention: min={attn_min:.4f}, max={attn_max:.4f}")
+        
+        attn_resized = (attn_resized - attn_min) / (attn_max - attn_min + 1e-8)
         
         # Apply colormap
         cmap = cm.get_cmap(colormap)

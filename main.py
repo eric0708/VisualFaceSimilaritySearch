@@ -245,12 +245,17 @@ def run_pipeline(args):
         clip_embedder = CLIPEmbedder(model_name=args.clip_model)
         clip_save_path = os.path.join(config.EMBEDDINGS_DIR, 'clip_embeddings.h5')
         
-        clip_embeddings, clip_paths = clip_embedder.embed_dataset(
-            image_paths,
-            batch_size=args.batch_size,
-            save_path=clip_save_path
-        )
-        print("✅ CLIP embeddings complete!")
+        if os.path.exists(clip_save_path):
+            print(f"Loading existing CLIP embeddings from {clip_save_path}...")
+            clip_embeddings, clip_paths, _ = CLIPEmbedder.load_embeddings(clip_save_path)
+            print(f"✅ Loaded {len(clip_embeddings)} CLIP embeddings")
+        else:
+            clip_embeddings, clip_paths = clip_embedder.embed_dataset(
+                image_paths,
+                batch_size=args.batch_size,
+                save_path=clip_save_path
+            )
+            print("✅ CLIP embeddings complete!")
     
     # Step 3: Generate DINOv2 Embeddings
     if args.step in ['all', 'embed_dinov2']:
@@ -262,12 +267,17 @@ def run_pipeline(args):
         dinov2_embedder = DINOv2Embedder(model_name=args.dinov2_model)
         dinov2_save_path = os.path.join(config.EMBEDDINGS_DIR, 'dinov2_embeddings.h5')
         
-        dinov2_embeddings, dinov2_paths = dinov2_embedder.embed_dataset(
-            image_paths,
-            batch_size=args.batch_size,
-            save_path=dinov2_save_path
-        )
-        print("✅ DINOv2 embeddings complete!")
+        if os.path.exists(dinov2_save_path):
+            print(f"Loading existing DINOv2 embeddings from {dinov2_save_path}...")
+            dinov2_embeddings, dinov2_paths, _ = DINOv2Embedder.load_embeddings(dinov2_save_path)
+            print(f"✅ Loaded {len(dinov2_embeddings)} DINOv2 embeddings")
+        else:
+            dinov2_embeddings, dinov2_paths = dinov2_embedder.embed_dataset(
+                image_paths,
+                batch_size=args.batch_size,
+                save_path=dinov2_save_path
+            )
+            print("✅ DINOv2 embeddings complete!")
     
     # Step 4: SKIP FAISS - Use direct numpy search instead
     print("\n" + "="*70)
@@ -323,19 +333,70 @@ def run_pipeline(args):
             try:
                 from attention_viz import AttentionVisualizer
                 from dinov2_embedder import DINOv2Embedder
+                import matplotlib.pyplot as plt
+                import cv2
+                from PIL import Image
                 
                 embedder = DINOv2Embedder(model_name=args.dinov2_model)
                 visualizer = AttentionVisualizer()
                 
                 save_dir = os.path.join(config.RESULTS_DIR, 'attention_results')
+                os.makedirs(save_dir, exist_ok=True)
                 
-                # Single image attention
-                attn_data = embedder.extract_attention_maps(image_paths[0])
-                visualizer.visualize_attention_map(
-                    attn_data['attention_map'],
-                    image_paths[0],
-                    save_path=os.path.join(save_dir, 'attention_demo.jpg')
-                )
+                # Generate all-layer attention maps for 10 samples
+                num_samples = min(10, len(image_paths))
+                print(f"Generating all-layer attention maps for {num_samples} samples...")
+                
+                for i in range(num_samples):
+                    img_path = image_paths[i]
+                    original_img = Image.open(img_path).convert('RGB')
+                    
+                    # Create figure: 3 rows, 5 columns
+                    # Col 0: Original (Middle)
+                    # Cols 1-4: Layers 0-11 (3x4 grid)
+                    fig, axes = plt.subplots(3, 5, figsize=(20, 12))
+                    
+                    # Clear all axes first and turn off axis
+                    for ax in axes.flatten():
+                        ax.axis('off')
+                    
+                    # Plot Original Image at (1, 0) - Middle Left
+                    axes[1, 0].imshow(original_img)
+                    axes[1, 0].set_title("Original Image", fontsize=12, fontweight='bold')
+                    
+                    # Plot Layers 0-11 in columns 1-4
+                    for layer_idx in range(12):
+                        row = layer_idx // 4
+                        col = (layer_idx % 4) + 1
+                        
+                        try:
+                            res = embedder.extract_attention_maps(img_path, layer_idx=layer_idx)
+                            attn_map = res['attention_map']
+                            
+                            # Normalize
+                            attn_map = (attn_map - attn_map.min()) / (attn_map.max() - attn_map.min() + 1e-8)
+                            
+                            # Resize
+                            w, h = original_img.size
+                            attn_resized = cv2.resize(attn_map, (w, h), interpolation=cv2.INTER_CUBIC)
+                            
+                            # Apply colormap
+                            heatmap = plt.cm.jet(attn_resized)[:, :, :3]
+                            
+                            # Overlay
+                            overlay = np.array(original_img) / 255.0 * 0.5 + heatmap * 0.5
+                            
+                            axes[row, col].imshow(overlay)
+                            axes[row, col].set_title(f"Layer {layer_idx}")
+                            
+                        except Exception as e:
+                            print(f"Error layer {layer_idx} for image {i}: {e}")
+                    
+                    plt.tight_layout()
+                    save_path = os.path.join(save_dir, f'all_layers_attention_sample_{i+1}.jpg')
+                    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+                    plt.close()
+                    print(f"  Saved {os.path.basename(save_path)}")
                 
                 print(f"✅ Attention visualization complete! Results in {save_dir}")
             except Exception as e:
