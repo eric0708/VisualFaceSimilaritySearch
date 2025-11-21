@@ -64,33 +64,31 @@ cd face_similarity_project
 
 ### Step 2: Create Virtual Environment (Recommended)
 
+For backend and LLM, run the following commands:
 ```bash
-# Create virtual environment
-python -m venv venv
-
-# Activate virtual environment
-# On Linux/Mac:
-source venv/bin/activate
-# On Windows:
-venv\Scripts\activate
+uv venv python=3.10
+uv sync
 ```
 
-### Step 3: Install Dependencies
-
+For frontend, run the following commands:
 ```bash
-# Install all required packages
-pip install -r requirements.txt
-
-# For GPU support with FAISS (optional but recommended):
-pip uninstall faiss-cpu
-pip install faiss-gpu
+cd frontend
+pnpm install
 ```
 
-### Step 4: Install CLIP (if not installed via requirements.txt)
+### Step 3: Run the project
 
+For backend and LLM, run the following commands in the terminal:
 ```bash
-pip install git+https://github.com/openai/CLIP.git
+uv run uvicorn backend.app:app --reload --host 0.0.0.0 --port 8000
 ```
+
+For frontend, run the following commands in another terminal:
+```bash
+cd frontend
+pnpm dev
+```
+
 
 ## 📊 Dataset Preparation
 
