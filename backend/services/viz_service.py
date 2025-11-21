@@ -17,9 +17,9 @@ from config import Config  # noqa: E402
 from data.data_preprocessing import DataPreprocessor  # noqa: E402
 from embeddings.clip_embedder import CLIPEmbedder  # noqa: E402
 from embeddings.dinov2_embedder import DINOv2Embedder  # noqa: E402
-from visualization.similarity_heatmap import SimilarityHeatmapGenerator  # noqa: E402
-from visualization.gradcam import CLIPGradCAM  # noqa: E402
 from visualization.attention_viz import AttentionVisualizer  # noqa: E402
+from visualization.gradcam import CLIPGradCAM  # noqa: E402
+from visualization.similarity_heatmap import SimilarityHeatmapGenerator  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -34,6 +34,7 @@ class VizService:
         self.heatmap_generators = {}  # model_name -> generator
         self.search_embedders = {}  # model_name -> embedder
         self.attention_visualizer = None
+        self.cached_embeddings = {}  # model_name -> (embeddings, paths, metadata)
         # Cache for image paths to ensure consistency across requests
         # This replaces the paths from the H5 file which might be stale (absolute paths from another machine)
         self.cached_image_paths = None
@@ -67,7 +68,7 @@ class VizService:
         if model_name == "gradcam":
             # Grad-CAM relies on CLIP model and embeddings
             return self.load_model("clip")
-        
+
         if model_name == "attention":
             # Attention relies on DINOv2 model
             return self.load_model("dinov2")
@@ -80,20 +81,28 @@ class VizService:
         self.get_embedder(model_name)
 
         # 2. Load Embeddings File (into memory if not cached)
-        emb_dir = self.config.EMBEDDINGS_DIR
-        emb_file = (
-            "clip_embeddings.h5" if model_name == "clip" else "dinov2_embeddings.h5"
-        )
-        emb_path = os.path.join(emb_dir, emb_file)
-
-        if not os.path.exists(emb_path):
-            logger.warning(f"Embeddings file missing: {emb_path}")
+        # Check if already cached
+        if model_name in self.cached_embeddings:
+            logger.info(f"Using cached embeddings for {model_name}")
         else:
-            # Trigger load
-            if model_name == "clip":
-                CLIPEmbedder.load_embeddings(emb_path)
+            emb_dir = self.config.EMBEDDINGS_DIR
+            emb_file = (
+                "clip_embeddings.h5" if model_name == "clip" else "dinov2_embeddings.h5"
+            )
+            emb_path = os.path.join(emb_dir, emb_file)
+
+            if not os.path.exists(emb_path):
+                logger.warning(f"Embeddings file missing: {emb_path}")
             else:
-                DINOv2Embedder.load_embeddings(emb_path)
+                # Trigger load and cache
+                if model_name == "clip":
+                    self.cached_embeddings[model_name] = CLIPEmbedder.load_embeddings(
+                        emb_path
+                    )
+                else:
+                    self.cached_embeddings[model_name] = DINOv2Embedder.load_embeddings(
+                        emb_path
+                    )
 
         # 3. Initialize Heatmap Generator
         # Map for heatmap generator
@@ -116,8 +125,16 @@ class VizService:
 
         if model_name not in self.heatmap_generators:
             logger.info(f"Initializing heatmap generator for {model_name}")
+
+            # Try to reuse model from search embedder if available
+            existing_model = None
+            if "dinov2" in model_name:
+                # Ensure DINOv2 embedder is loaded to reuse its model
+                embedder = self.get_embedder("dinov2")
+                existing_model = embedder.model
+
             self.heatmap_generators[model_name] = SimilarityHeatmapGenerator(
-                model_name=model_name, device=self.device
+                model_name=model_name, device=self.device, model=existing_model
             )
 
         return self.heatmap_generators[model_name]
@@ -133,7 +150,7 @@ class VizService:
             else:
                 raise ValueError(f"Unknown model type: {model_type}")
         return self.search_embedders[model_type]
-    
+
     def get_attention_visualizer(self):
         if self.attention_visualizer is None:
             self.attention_visualizer = AttentionVisualizer(self.config)
@@ -149,52 +166,52 @@ class VizService:
             dimensions: Dict with 'query_patches', 'result_patches' counts
         """
         if model_name == "attention":
-             # For Attention model, we want to return the actual attention map for the specified layer
-             # The result_path contains the filename layer_X.jpg
-             try:
-                 filename = os.path.basename(result_path)
-                 # Format is layer_{idx}.jpg
-                 if "layer_" in filename:
-                     layer_part = filename.split("layer_")[1]
-                     layer_idx = int(layer_part.split(".")[0])
-                 else:
-                     # Default to last layer if can't parse
-                     layer_idx = -1
-                 
-                 embedder = self.get_embedder("dinov2")
-                 res = embedder.extract_attention_maps(query_path, layer_idx=layer_idx)
-                 attn_map = res["attention_map"] # [H, W] numpy array
-                 
-                 flat_attn = attn_map.flatten().tolist()
-                 grid_size = int(np.sqrt(len(flat_attn)))
-                 
-                 # Broadcast to create a fake "matrix" where every row is the same Attention Map
-                 # This ensures that "max" reduction in frontend gives back the Attention Map
-                 matrix = [flat_attn for _ in range(len(flat_attn))]
-                 
-                 return {
-                     "matrix": matrix,
-                     "shape": [len(flat_attn), len(flat_attn)],
-                     "grid_size": grid_size,
-                 }
-             except Exception as e:
-                 logger.error(f"Error computing attention matrix: {e}")
-                 # Fallback to zeros
-                 dummy_size = 16 * 16
-                 return {
-                     "matrix": [0.0] * dummy_size,
-                     "shape": [dummy_size, dummy_size],
-                     "grid_size": 16,
-                 }
+            # For Attention model, we want to return the actual attention map for the specified layer
+            # The result_path contains the filename layer_X.jpg
+            try:
+                filename = os.path.basename(result_path)
+                # Format is layer_{idx}.jpg
+                if "layer_" in filename:
+                    layer_part = filename.split("layer_")[1]
+                    layer_idx = int(layer_part.split(".")[0])
+                else:
+                    # Default to last layer if can't parse
+                    layer_idx = -1
+
+                embedder = self.get_embedder("dinov2")
+                res = embedder.extract_attention_maps(query_path, layer_idx=layer_idx)
+                attn_map = res["attention_map"]  # [H, W] numpy array
+
+                flat_attn = attn_map.flatten().tolist()
+                grid_size = int(np.sqrt(len(flat_attn)))
+
+                # Broadcast to create a fake "matrix" where every row is the same Attention Map
+                # This ensures that "max" reduction in frontend gives back the Attention Map
+                matrix = [flat_attn for _ in range(len(flat_attn))]
+
+                return {
+                    "matrix": matrix,
+                    "shape": [len(flat_attn), len(flat_attn)],
+                    "grid_size": grid_size,
+                }
+            except Exception as e:
+                logger.error(f"Error computing attention matrix: {e}")
+                # Fallback to zeros
+                dummy_size = 16 * 16
+                return {
+                    "matrix": [0.0] * dummy_size,
+                    "shape": [dummy_size, dummy_size],
+                    "grid_size": 16,
+                }
 
         if model_name == "gradcam":
             # Special handling for Grad-CAM
             # Use CLIP embedder to get the model and process images
             embedder = self.get_embedder("clip")
-            
+
             # Initialize Grad-CAM with the CLIP model from embedder
             grad_cam = CLIPGradCAM(embedder.model, device=self.device)
-            
+
             try:
                 # 1. Get query embedding (target for CAM)
                 query_emb_np = embedder.embed_image(query_path)
@@ -233,32 +250,42 @@ class VizService:
 
         generator = self.get_generator(model_name)
 
-        # Extract features
-        # These return [num_patches, dim]
-        query_features, _ = generator.extract_patch_features(query_path)
-        result_features, _ = generator.extract_patch_features(result_path)
+        try:
+            # Extract features
+            # These return [num_patches, dim]
+            query_features, _ = generator.extract_patch_features(query_path)
+            result_features, _ = generator.extract_patch_features(result_path)
 
-        # Normalize
-        query_norm = query_features / (
-            np.linalg.norm(query_features, axis=1, keepdims=True) + 1e-8
-        )
-        result_norm = result_features / (
-            np.linalg.norm(result_features, axis=1, keepdims=True) + 1e-8
-        )
+            # Normalize
+            query_norm = query_features / (
+                np.linalg.norm(query_features, axis=1, keepdims=True) + 1e-8
+            )
+            result_norm = result_features / (
+                np.linalg.norm(result_features, axis=1, keepdims=True) + 1e-8
+            )
 
-        # Compute matrix: [num_patches_q, num_patches_r]
-        similarity_matrix = np.dot(query_norm, result_norm.T)
+            # Compute matrix: [num_patches_q, num_patches_r]
+            similarity_matrix = np.dot(query_norm, result_norm.T)
 
-        # Determine grid size
-        # Assuming square grid
-        num_patches = len(query_features)
-        grid_size = int(np.sqrt(num_patches))
+            # Determine grid size
+            # Assuming square grid
+            num_patches = len(query_features)
+            grid_size = int(np.sqrt(num_patches))
 
-        return {
-            "matrix": similarity_matrix.tolist(),  # JSON serializable
-            "shape": [len(query_features), len(result_features)],
-            "grid_size": grid_size,
-        }
+            return {
+                "matrix": similarity_matrix.tolist(),  # JSON serializable
+                "shape": [len(query_features), len(result_features)],
+                "grid_size": grid_size,
+            }
+        except Exception as e:
+            logger.error(f"Error computing similarity matrix for {model_name}: {e}")
+            # Fallback to zeros
+            dummy_size = 16 * 16
+            return {
+                "matrix": [0.0] * dummy_size,
+                "shape": [dummy_size, dummy_size],
+                "grid_size": 16,
+            }
 
     def preprocess_uploaded_image(self, image_path, output_path=None):
         """
@@ -323,21 +350,15 @@ class VizService:
         query_embedding = embedder.embed_image(query_path)
 
         # Load all embeddings
-        emb_dir = self.config.EMBEDDINGS_DIR
-        emb_file = (
-            "clip_embeddings.h5" if model_name == "clip" else "dinov2_embeddings.h5"
-        )
-        emb_path = os.path.join(emb_dir, emb_file)
+        if model_name not in self.cached_embeddings:
+            logger.info(f"Embeddings for {model_name} not cached, loading now...")
+            self.load_model(model_name)
 
-        if not os.path.exists(emb_path):
-            logger.warning(f"Embeddings file not found: {emb_path}")
-            return []
-
-        # Load embeddings
-        if model_name == "clip":
-            all_embeddings, _, _ = CLIPEmbedder.load_embeddings(emb_path)
+        if model_name in self.cached_embeddings:
+            all_embeddings, _, _ = self.cached_embeddings[model_name]
         else:
-            all_embeddings, _, _ = DINOv2Embedder.load_embeddings(emb_path)
+            logger.error(f"Failed to load embeddings for {model_name}")
+            return []
 
         # Lazy initialization of cached_image_paths if needed
         if self.cached_image_paths is None:
@@ -393,45 +414,36 @@ class VizService:
         """
         embedder = self.get_embedder("dinov2")
         visualizer = self.get_attention_visualizer()
-        
+
         # Directory to save temporary attention maps
         # We use a unique ID for this batch to avoid collisions if multiple users (though local demo)
         session_id = str(uuid.uuid4())[:8]
         temp_dir = os.path.join(project_root, "data", "temp_attention", session_id)
         os.makedirs(temp_dir, exist_ok=True)
-        
+
         results = []
-        
+
         # Layers 0 to 11
         for layer_idx in range(12):
             try:
                 # Extract attention map
-                res = embedder.extract_attention_maps(
-                    query_path, layer_idx=layer_idx
-                )
+                res = embedder.extract_attention_maps(query_path, layer_idx=layer_idx)
                 attn_map = res["attention_map"]
-                
+
                 # Save visualization
                 filename = f"layer_{layer_idx}.jpg"
                 save_path = os.path.join(temp_dir, filename)
-                
+
                 # Use visualizer to save overlay
                 visualizer.visualize_attention_map(
-                    attn_map,
-                    query_path,
-                    save_path=save_path,
-                    alpha=0.5,
-                    colormap="jet"
+                    attn_map, query_path, save_path=save_path, alpha=0.5, colormap="jet"
                 )
-                
+
                 # Create result entry
                 # score = layer_idx (to display "Sim: 0.000" -> "Layer 0")
-                results.append({
-                    "path": save_path,
-                    "score": float(layer_idx) 
-                })
-                
+                results.append({"path": save_path, "score": float(layer_idx)})
+
             except Exception as e:
                 logger.error(f"Error generating attention for layer {layer_idx}: {e}")
-        
+
         return results

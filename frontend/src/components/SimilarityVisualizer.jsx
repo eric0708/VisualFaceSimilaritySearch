@@ -42,45 +42,49 @@ const SimilarityVisualizer = ({
     fetchData();
   }, [queryPath, resultPath, model]);
 
-  // Derived Heatmap Data
-  const heatmapData = useMemo(() => {
+  // Pre-calculate Max Map (Optimization)
+  const maxMap = useMemo(() => {
     if (!matrix || !gridSize) return null;
+    const size = gridSize * gridSize;
 
-    const size = gridSize * gridSize; // Total patches
-
-    // Check if matrix is valid
     if (!Array.isArray(matrix) || matrix.length === 0) return null;
 
-    let map = new Array(size).fill(0);
-
+    const map = new Array(size).fill(0);
     try {
-      if (viewMode === "max") {
-        // Compute max for each result patch (axis 0)
-        for (let r = 0; r < size; r++) {
-          let maxVal = -1;
-          for (let q = 0; q < size; q++) {
-            // Safety check: ensure matrix[q] exists
-            if (matrix[q] && matrix[q][r] !== undefined) {
-              if (matrix[q][r] > maxVal) maxVal = matrix[q][r];
-            }
+      // Compute max for each result patch (axis 0)
+      for (let r = 0; r < size; r++) {
+        let maxVal = -1;
+        for (let q = 0; q < size; q++) {
+          if (matrix[q] && matrix[q][r] !== undefined) {
+            if (matrix[q][r] > maxVal) maxVal = matrix[q][r];
           }
-          map[r] = maxVal;
         }
-      } else {
-        // Pairwise mode
-        if (hoveredQueryIdx !== null && matrix[hoveredQueryIdx]) {
-          map = matrix[hoveredQueryIdx];
-        } else {
-          map = new Array(size).fill(0);
-        }
+        map[r] = maxVal;
       }
     } catch (e) {
-      console.error("Error calculating heatmap", e);
+      console.error("Error calculating max heatmap", e);
       return null;
     }
-
     return map;
-  }, [matrix, viewMode, hoveredQueryIdx, gridSize]);
+  }, [matrix, gridSize]);
+
+  // Derived Heatmap Data
+  const heatmapData = useMemo(() => {
+    if (!matrix || !maxMap) return null;
+
+    try {
+      if (viewMode === "pairwise" && hoveredQueryIdx !== null) {
+        if (matrix[hoveredQueryIdx]) {
+          return matrix[hoveredQueryIdx];
+        }
+      }
+      // Default to maxMap (for 'max' mode OR 'pairwise' when not hovering)
+      return maxMap;
+    } catch (e) {
+      console.error("Error getting heatmap data", e);
+      return null;
+    }
+  }, [matrix, maxMap, viewMode, hoveredQueryIdx]);
 
   // Color Scale
   const colorScale = useMemo(() => {
@@ -179,6 +183,7 @@ const SimilarityVisualizer = ({
                     gridTemplateColumns: `repeat(${gridSize}, 1fr)`,
                     gridTemplateRows: `repeat(${gridSize}, 1fr)`,
                     cursor: "crosshair",
+                    zIndex: 10,
                   }}
                   onMouseLeave={() => setHoveredQueryIdx(null)}
                 >

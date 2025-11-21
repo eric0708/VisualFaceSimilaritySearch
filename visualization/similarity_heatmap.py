@@ -15,22 +15,40 @@ import os
 class SimilarityHeatmapGenerator:
     """Generate heatmaps showing similar regions between images"""
     
-    def __init__(self, model_name='dinov2_vitb14', device='mps'):
+    def __init__(self, model_name='dinov2_vitb14', device='mps', model=None):
         """
         Initialize with DINOv2 for patch-level features
         
         Args:
             model_name: DINOv2 model variant
             device: Device to use
+            model: Optional pre-loaded model to reuse
         """
         self.device = device
         self.model_name = model_name
-        self.model = None
+        self.model = model
         self.preprocess = None
+        
+        # If model is provided, ensure we initialize preprocess
+        if self.model is not None:
+            self._init_preprocess()
+            
+    def _init_preprocess(self):
+        """Initialize preprocessing transforms"""
+        from torchvision import transforms
+        self.preprocess = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], 
+                               std=[0.229, 0.224, 0.225])
+        ])
         
     def load_model(self):
         """Load DINOv2 model for feature extraction"""
         if self.model is not None:
+            # Ensure preprocess is initialized even if model was passed
+            if self.preprocess is None:
+                self._init_preprocess()
             return
         
         import torch
@@ -40,14 +58,7 @@ class SimilarityHeatmapGenerator:
         self.model.to(self.device)
         self.model.eval()
         
-        # Preprocessing
-        from torchvision import transforms
-        self.preprocess = transforms.Compose([
-            transforms.Resize((224, 224)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], 
-                               std=[0.229, 0.224, 0.225])
-        ])
+        self._init_preprocess()
     
     def extract_patch_features(self, image_path):
         """
