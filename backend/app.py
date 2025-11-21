@@ -1,12 +1,13 @@
-import sys
+import logging
 import os
-from fastapi import FastAPI, File, UploadFile, HTTPException, Form
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 import shutil
+import sys
 from pathlib import Path
 from typing import Optional
-import logging
+
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 # Add project root to sys.path
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -41,10 +42,13 @@ app.mount("/images", StaticFiles(directory=project_root), name="images")
 async def get_models():
     return {
         "models": [
-            {"id": "dinov2", "name": "DINOv2 (ViT-B/14)"},
-            {"id": "clip", "name": "CLIP (ViT-B/32)"}
+            {"id": "dinov2", "name": "Embedding Search: DINOv2 (ViT-B/14)"},
+            {"id": "clip", "name": "Embedding Search: CLIP (ViT-B/32)"},
+            {"id": "gradcam", "name": "Grad-CAM: CLIP (ViT-B/32)"},
+            {"id": "attention", "name": "Attention: DINOV2 (ViT-B/14)"},
         ]
     }
+
 
 @app.get("/samples")
 async def get_samples():
@@ -52,20 +56,23 @@ async def get_samples():
     processed_dir = Path(config.PROCESSED_DATA_DIR)
     if not processed_dir.exists():
         return {"images": []}
-    
+
     # Get first 20 images
     images = []
     count = 0
-    for ext in ['*.jpg', '*.png', '*.jpeg']:
+    for ext in ["*.jpg", "*.png", "*.jpeg"]:
         for img_path in processed_dir.rglob(ext):
-            if count >= 20: break
+            if count >= 20:
+                break
             # Return path relative to project root so we can serve it via /images
             rel_path = str(img_path.relative_to(project_root))
             images.append(rel_path)
             count += 1
-        if count >= 20: break
-            
+        if count >= 20:
+            break
+
     return {"images": images}
+
 
 @app.post("/load_model")
 async def load_model(model: str = Form(...)):
@@ -77,18 +84,19 @@ async def load_model(model: str = Form(...)):
         logging.error(f"Load model error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.post("/search")
 async def search(
     image: Optional[UploadFile] = File(None),
     image_path: Optional[str] = Form(None),
-    model: str = Form("dinov2")
+    model: str = Form("dinov2"),
 ):
     """
     Search for similar images.
     Accepts either an uploaded file or an existing image path.
     """
     temp_path = None
-    
+
     try:
         if image:
             # Save uploaded file
@@ -98,23 +106,22 @@ async def search(
             temp_path = temp_dir / f"raw_{image.filename}"
             with temp_path.open("wb") as buffer:
                 shutil.copyfileobj(image.file, buffer)
-            
+
             # Preprocess the uploaded image
             processed_filename = f"processed_{image.filename}"
             processed_path = temp_dir / processed_filename
-            
+
             try:
                 # Preprocess (Face detect -> Crop -> Resize)
                 processed_path_str = viz_service.preprocess_uploaded_image(
-                    str(temp_path), 
-                    output_path=str(processed_path)
+                    str(temp_path), output_path=str(processed_path)
                 )
                 query_path = processed_path_str
             except Exception as e:
                 logging.error(f"Preprocessing failed: {e}")
                 # Fallback to raw image if preprocessing fails really badly
                 query_path = str(temp_path)
-                
+
         elif image_path:
             # Use existing path (ensure it's absolute)
             if not os.path.isabs(image_path):
@@ -123,9 +130,14 @@ async def search(
                 query_path = image_path
         else:
             raise HTTPException(status_code=400, detail="No image provided")
-            
-        results = viz_service.search_similar(query_path, model_name=model, top_k=6)
-        
+
+        if model == "attention":
+            # Special case for Attention Visualization
+            # Returns layers as results
+            results = viz_service.generate_layer_attention_results(query_path)
+        else:
+            results = viz_service.search_similar(query_path, model_name=model, top_k=6)
+
         # Fix paths for frontend
         cleaned_results = []
         for res in results:
@@ -133,13 +145,11 @@ async def search(
             try:
                 rel_path = str(path_obj.relative_to(project_root))
             except ValueError:
-                rel_path = str(path_obj) 
-            
-            cleaned_results.append({
-                "path": rel_path,
-                "score": res["score"]
-            })
-            
+                # If path is not relative to project root (e.g. absolute /tmp), keep as is or handle
+                rel_path = str(path_obj)
+
+            cleaned_results.append({"path": rel_path, "score": res["score"]})
+
         # Determine return path (relative to project root for frontend serving)
         try:
             if os.path.isabs(query_path):
@@ -151,20 +161,18 @@ async def search(
             # But here temp_uploads is relative to cwd which is project root
             return_query_path = query_path
 
-        return {
-            "results": cleaned_results,
-            "query_path": return_query_path
-        }
-        
+        return {"results": cleaned_results, "query_path": return_query_path}
+
     except Exception as e:
         logging.error(f"Search error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.post("/analyze")
 async def analyze(
     query_path: str = Form(...),
     result_path: str = Form(...),
-    model: str = Form("dinov2")
+    model: str = Form("dinov2"),
 ):
     """
     Compute similarity matrix between query and result.
@@ -175,19 +183,21 @@ async def analyze(
             q_path = os.path.join(project_root, query_path)
         else:
             q_path = query_path
-            
+
         if not os.path.isabs(result_path):
             r_path = os.path.join(project_root, result_path)
         else:
             r_path = result_path
-            
+
         data = viz_service.compute_similarity_matrix(q_path, r_path, model_name=model)
         return data
-        
+
     except Exception as e:
         logging.error(f"Analyze error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
+
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000)

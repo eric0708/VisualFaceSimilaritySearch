@@ -5,14 +5,17 @@ Team Member: Hao-Cheng Chang
 """
 
 import os
-from typing import Dict, List, Tuple
 
-import h5py
-import numpy as np
+# Enable MPS fallback for unsupported operations (needed for DINOv2 on Apple Silicon)
+os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+
 import torch
+import numpy as np
 from PIL import Image
-from torchvision import transforms
+from typing import List, Tuple, Dict, Optional
 from tqdm import tqdm
+import h5py
+from torchvision import transforms
 
 from config import Config
 
@@ -183,162 +186,190 @@ class DINOv2Embedder:
         self, image_path: str, layer_idx: int = -1
     ) -> Dict[str, np.ndarray]:
         """
-        Extract attention maps from specified layer
-
-        Args:
-            image_path: Path to image
-            layer_idx: Layer index to extract attention from (-1 for last layer)
+        Extract attention maps from specified layer of DINOv2.
 
         Returns:
-            Dictionary with attention maps and patch embeddings
+            {
+                'attention_map': [H, W] CLS→patch attention (normalized),
+                'full_attention': [N, N] averaged full attention matrix,
+                'patch_embeddings': [1, num_patches, D],
+                'cls_embedding': [1, D],
+            }
         """
         image = Image.open(image_path).convert("RGB")
         image_input = self.preprocess(image).unsqueeze(0).to(self.device)
-
-        grid_size = getattr(self.model.patch_embed, "grid_size", None)
-        if isinstance(grid_size, torch.Size):
-            grid_size = tuple(grid_size)
-        if grid_size is None:
-            num_patch_tokens = getattr(self.model.patch_embed, "num_patches", 196)
-            grid_dim = int(np.sqrt(num_patch_tokens))
-            grid_size = (grid_dim, grid_dim)
-        elif isinstance(grid_size, int):
-            grid_size = (grid_size, grid_size)
-        elif isinstance(grid_size, (list, tuple)):
-            if len(grid_size) == 1:
-                grid_size = (int(grid_size[0]), int(grid_size[0]))
-            else:
-                grid_size = (int(grid_size[0]), int(grid_size[1]))
-        grid_height, grid_width = grid_size
-        total_patch_tokens = grid_height * grid_width
-        total_tokens_with_cls = total_patch_tokens + 1
-
         if self.device == "mps":
             image_input = image_input.float()
 
-        attention_maps = {}
+        attention_maps: Dict[str, torch.Tensor] = {}
 
-        def hook_fn_forward_attn(module, input, output):
-            """Hook to capture attention weights"""
-            if isinstance(output, torch.Tensor):
-                attention_maps["attn"] = output.detach()
-            elif isinstance(output, (tuple, list)) and len(output) > 0:
-                tensor_out = output[0]
-                if isinstance(tensor_out, torch.Tensor):
-                    attention_maps["attn"] = tensor_out.detach()
+        # --- Hook that inspects inputs/outputs for a 4D attention tensor ---
+        def hook_fn_forward_attn(module, inputs, output):
+            # Search inputs and output for a tensor that looks like attention weights: [B, heads, N, N]
+            candidates = []
 
-        # Register hook on attention layer
+            def collect_tensors(obj):
+                if isinstance(obj, torch.Tensor):
+                    candidates.append(obj.detach().cpu())
+                elif isinstance(obj, (list, tuple)):
+                    for o in obj:
+                        collect_tensors(o)
+                elif isinstance(obj, dict):
+                    for o in obj.values():
+                        collect_tensors(o)
+
+            collect_tensors(inputs)
+            collect_tensors(output)
+
+            # pick the first 4D tensor with square last two dims
+            for t in candidates:
+                if t.ndim == 4:
+                    b, h, n1, n2 = t.shape
+                    if n1 == n2:
+                        attention_maps["attn"] = t
+                        return
+
+            # If not found, try to compute it manually if we have the input and the module has qkv
+            if (
+                "attn" not in attention_maps
+                and hasattr(module, "qkv")
+                and hasattr(module, "num_heads")
+                and hasattr(module, "scale")
+            ):
+                try:
+                    x = inputs[0]
+                    B, N, C = x.shape
+                    qkv = module.qkv(x)
+                    # Reshape: [B, N, 3, num_heads, head_dim]
+                    qkv = qkv.reshape(B, N, 3, module.num_heads, C // module.num_heads)
+                    # Permute: [3, B, num_heads, N, head_dim]
+                    qkv = qkv.permute(2, 0, 3, 1, 4)
+                    q, k, v = qkv[0], qkv[1], qkv[2]
+
+                    attn = (q @ k.transpose(-2, -1)) * module.scale
+                    attn = attn.softmax(dim=-1)
+                    attention_maps["attn"] = attn.detach().cpu()
+                    return
+                except Exception:
+                    pass
+
+        # choose layer
         if layer_idx == -1:
             layer_idx = len(self.model.blocks) - 1
 
-        # Get the attention module (different path than attn_drop)
+        blk = self.model.blocks[layer_idx]
+
+        # Try several plausible targets for registering the hook
+        handle = None
+        tried_targets = []
         try:
-            # Try to hook the dropout module to capture attention weights directly
-            block_attn = self.model.blocks[layer_idx].attn
-            attn_module = getattr(block_attn, "proj_drop", block_attn)
-            handle = attn_module.register_forward_hook(hook_fn_forward_attn)
+            # Prefer registering on a Dropout inside attention if available (keeps pre-dropout attn)
+            if (
+                hasattr(blk, "attn")
+                and hasattr(blk.attn, "attn_drop")
+                and isinstance(blk.attn.attn_drop, torch.nn.Module)
+            ):
+                tried_targets.append("blk.attn.attn_drop")
+                handle = blk.attn.attn_drop.register_forward_hook(hook_fn_forward_attn)
+            # fall back to registering on the attention module itself
+            elif hasattr(blk, "attn") and isinstance(blk.attn, torch.nn.Module):
+                tried_targets.append("blk.attn")
+                handle = blk.attn.register_forward_hook(hook_fn_forward_attn)
+            else:
+                # try to find a submodule containing 'attn' in its name
+                for name, sub in blk.named_modules():
+                    if "attn" in name:
+                        tried_targets.append(f"blk.{name}")
+                        handle = sub.register_forward_hook(hook_fn_forward_attn)
+                        break
+
+            if handle is None:
+                raise RuntimeError(
+                    f"No attention submodule found in block (tried: {tried_targets})"
+                )
         except Exception as e:
             print(f"Warning: Could not register hook on attention module: {e}")
-            # Fallback: return dummy attention
+            # fallback synthetic map
+            num_patches = 14
             return {
-                "attention_map": np.ones((grid_height, grid_width)) * 0.5,
-                "full_attention": np.eye(total_tokens_with_cls),
-                "patch_embeddings": np.zeros(
-                    (1, total_patch_tokens, self.embedding_dim)
+                "attention_map": np.ones((num_patches, num_patches), dtype=np.float32)
+                * 0.5,
+                "full_attention": np.eye(
+                    num_patches * num_patches + 1, dtype=np.float32
                 ),
-                "cls_embedding": np.zeros((1, self.embedding_dim)),
+                "patch_embeddings": np.zeros(
+                    (1, 196, self.embedding_dim), dtype=np.float32
+                ),
+                "cls_embedding": np.zeros((1, self.embedding_dim), dtype=np.float32),
             }
 
-        # Forward pass
+        # forward pass
         with torch.no_grad():
-            try:
-                features = self.model.forward_features(image_input)
-            except Exception as e:
-                print(f"Warning: Forward pass failed: {e}")
-                handle.remove()
-                return {
-                    "attention_map": np.ones((grid_height, grid_width)) * 0.5,
-                    "full_attention": np.eye(total_tokens_with_cls),
-                    "patch_embeddings": np.zeros(
-                        (1, total_patch_tokens, self.embedding_dim)
-                    ),
-                    "cls_embedding": np.zeros((1, self.embedding_dim)),
-                }
+            features = self.model.forward_features(image_input)
 
-        handle.remove()
+        handle.remove()  # remove hook
 
-        # Process attention maps
-        if "attn" not in attention_maps or attention_maps["attn"] is None:
-            # Fallback: create synthetic attention map
-            print("Warning: No attention captured, creating synthetic map")
-            cls_attn_map = np.ones((grid_height, grid_width)) * 0.5
+        # --- Process attention ---
+        if "attn" not in attention_maps:
+            print("Warning: attention hook did not fire; using synthetic map")
+            num_patches = 14
+            attn_avg_np = np.eye(num_patches * num_patches + 1, dtype=np.float32)
+            cls_attn_map = np.ones((num_patches, num_patches), dtype=np.float32) * 0.5
         else:
-            attn = attention_maps["attn"]
-
-            # Move to CPU for processing
+            attn = attention_maps["attn"]  # [B, heads, N, N]
             if isinstance(attn, torch.Tensor):
-                attn = attn.cpu().numpy()
+                attn = attn.cpu()
+            attn_np = attn.numpy()
 
-            # Handle different attention tensor shapes
-            if len(attn.shape) == 4:  # [B, num_heads, N, N]
-                # Average over heads
-                attn_avg = attn.mean(axis=1)[0]  # [N, N]
-            elif len(attn.shape) == 3:  # [B, N, N]
-                attn_avg = attn[0]  # [N, N]
+            # average over heads, take first batch
+            attn_avg = attn_np.mean(axis=1)[0]  # [N, N]
+            attn_avg_np = attn_avg
+
+            # CLS → patches (skip token 0)
+            cls_attn = attn_avg[0, 1:]  # [num_patches]
+            num_tokens = cls_attn.shape[0]
+            side = int(round(np.sqrt(num_tokens)))
+
+            # robust reshape (in case tokens are not perfect square)
+            if side * side != num_tokens:
+                padded = np.zeros(side * side, dtype=cls_attn.dtype)
+                padded[: min(num_tokens, side * side)] = cls_attn[: side * side]
+                cls_attn_map = padded.reshape(side, side)
             else:
-                # Fallback
-                cls_attn_map = np.ones((grid_height, grid_width)) * 0.5
-                attn_avg = np.eye(total_tokens_with_cls)
+                cls_attn_map = cls_attn.reshape(side, side)
 
-            # Get CLS token attention to all patches
-            if attn_avg.shape[0] != attn_avg.shape[1]:
-                cls_attn_map = np.ones((grid_height, grid_width)) * 0.5
-                attn_avg = np.eye(total_tokens_with_cls)
-            elif attn_avg.shape[0] > 1:
-                cls_attn = attn_avg[0, 1:]  # [num_patches]
+            # normalize to [0, 1]
+            cls_attn_map = cls_attn_map - cls_attn_map.min()
+            denom = cls_attn_map.max() - cls_attn_map.min() + 1e-8
+            cls_attn_map = cls_attn_map / denom
 
-                # Reshape to spatial grid
-                if cls_attn.shape[0] != total_patch_tokens:
-                    if cls_attn.shape[0] > total_patch_tokens:
-                        cls_attn = cls_attn[:total_patch_tokens]
-                    else:
-                        pad_width = total_patch_tokens - cls_attn.shape[0]
-                        cls_attn = np.pad(cls_attn, (0, pad_width), constant_values=0.0)
-                cls_attn_map = cls_attn.reshape(grid_height, grid_width)
-            else:
-                cls_attn_map = np.ones((grid_height, grid_width)) * 0.5
-                attn_avg = np.eye(total_tokens_with_cls)
-
-        # Extract embeddings from features
+        # --- Embeddings from forward_features ---
         if isinstance(features, dict):
             patch_embeddings = features.get(
                 "x_norm_patchtokens", features.get("x", None)
             )
             cls_embedding = features.get("x_norm_clstoken", None)
 
-            if patch_embeddings is not None and isinstance(
-                patch_embeddings, torch.Tensor
-            ):
+            if isinstance(patch_embeddings, torch.Tensor):
                 patch_embeddings = patch_embeddings.cpu().numpy()
             else:
-                patch_embeddings = np.zeros((1, total_patch_tokens, self.embedding_dim))
+                patch_embeddings = np.zeros(
+                    (1, 196, self.embedding_dim), dtype=np.float32
+                )
 
-            if cls_embedding is not None and isinstance(cls_embedding, torch.Tensor):
+            if isinstance(cls_embedding, torch.Tensor):
                 cls_embedding = cls_embedding.cpu().numpy()
             else:
-                cls_embedding = np.zeros((1, self.embedding_dim))
+                cls_embedding = np.zeros((1, self.embedding_dim), dtype=np.float32)
         else:
-            patch_embeddings = np.zeros((1, total_patch_tokens, self.embedding_dim))
-            cls_embedding = np.zeros((1, self.embedding_dim))
+            patch_embeddings = np.zeros((1, 196, self.embedding_dim), dtype=np.float32)
+            cls_embedding = np.zeros((1, self.embedding_dim), dtype=np.float32)
 
         return {
             "attention_map": cls_attn_map,
-            "full_attention": attn_avg
-            if "attn_avg" in locals()
-            else np.eye(total_tokens_with_cls),
+            "full_attention": attn_avg_np,
             "patch_embeddings": patch_embeddings,
             "cls_embedding": cls_embedding,
-            "features": features,
         }
 
     def get_layer_embeddings(
@@ -416,7 +447,7 @@ class DINOv2Embedder:
             f.attrs["embedding_dim"] = self.embedding_dim
             f.attrs["num_images"] = len(image_paths)
 
-        print("✅ Embeddings saved successfully!")
+        print(f"✅ Embeddings saved successfully!")
 
     @staticmethod
     def load_embeddings(load_path: str) -> Tuple[np.ndarray, List[str], Dict]:
@@ -440,7 +471,7 @@ def main():
     config = Config()
 
     # Check if processed images exist
-    from data.data_preprocessing import DataPreprocessor
+    from data_preprocessing import DataPreprocessor
 
     preprocessor = DataPreprocessor()
 

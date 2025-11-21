@@ -4,31 +4,22 @@ Runs face similarity search pipeline WITHOUT FAISS indexing
 Uses direct numpy similarity computation instead
 """
 
-import argparse
 import os
 import sys
-import time
-
-import clip
-import matplotlib.pyplot as plt
-import numpy as np
-from PIL import Image
-
-from config import Config
-from data.data_preprocessing import DataPreprocessor
-from embeddings.clip_embedder import CLIPEmbedder
-from embeddings.dinov2_embedder import DINOv2Embedder
-from utils.helpers import visualize_top_k_results
-from visualization.attention_viz import AttentionVisualizer
-from visualization.gradcam import CLIPGradCAM
 
 # Enable MPS fallback for unsupported operations (needed for DINOv2 on Apple Silicon)
 os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+
+import argparse
+import numpy as np
+from pathlib import Path
 
 # Add project root to Python path
 project_root = os.path.dirname(os.path.abspath(__file__))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
+
+from config import Config
 
 
 def compute_similarities(
@@ -76,6 +67,10 @@ def create_summary_grid(
         compute_similarities_func: Function to compute similarities
         save_path: Path to save the summary grid
     """
+    from PIL import Image
+    import matplotlib.pyplot as plt
+    import time
+
     num_samples = len(query_indices)
     top_k = 10  # Show top 10 for summary
 
@@ -142,6 +137,8 @@ def create_embedding_comparison(
     """
     Create side-by-side comparison of CLIP vs DINOv2 results
     """
+    from PIL import Image
+    import matplotlib.pyplot as plt
 
     print(f"  Generating comparison visualizations for {len(query_indices)} samples...")
 
@@ -224,6 +221,7 @@ def run_pipeline(args):
         print("\n" + "=" * 70)
         print("STEP 1: DATA PREPROCESSING")
         print("=" * 70)
+        from data.data_preprocessing import DataPreprocessor
 
         preprocessor = DataPreprocessor()
 
@@ -251,6 +249,7 @@ def run_pipeline(args):
             return
 
     # Get processed image paths
+    from data.data_preprocessing import DataPreprocessor
 
     preprocessor = DataPreprocessor()
     image_paths = preprocessor.collect_image_paths(config.PROCESSED_DATA_DIR)
@@ -264,35 +263,131 @@ def run_pipeline(args):
         print("\n" + "=" * 70)
         print("STEP 2: GENERATING CLIP EMBEDDINGS")
         print("=" * 70)
+        from embeddings.clip_embedder import CLIPEmbedder
 
         clip_embedder = CLIPEmbedder(model_name=args.clip_model)
         clip_save_path = os.path.join(config.EMBEDDINGS_DIR, "clip_embeddings.h5")
 
-        clip_embeddings, clip_paths = clip_embedder.embed_dataset(
-            image_paths, batch_size=args.batch_size, save_path=clip_save_path
-        )
-        print("✅ CLIP embeddings complete!")
+        if os.path.exists(clip_save_path):
+            print(f"Loading existing CLIP embeddings from {clip_save_path}...")
+            clip_embeddings, clip_paths, _ = CLIPEmbedder.load_embeddings(
+                clip_save_path
+            )
+            print(f"✅ Loaded {len(clip_embeddings)} CLIP embeddings")
+        else:
+            clip_embeddings, clip_paths = clip_embedder.embed_dataset(
+                image_paths, batch_size=args.batch_size, save_path=clip_save_path
+            )
+            print("✅ CLIP embeddings complete!")
 
     # Step 3: Generate DINOv2 Embeddings
     if args.step in ["all", "embed_dinov2"]:
         print("\n" + "=" * 70)
         print("STEP 3: GENERATING DINOV2 EMBEDDINGS")
         print("=" * 70)
+        from embeddings.dinov2_embedder import DINOv2Embedder
 
         dinov2_embedder = DINOv2Embedder(model_name=args.dinov2_model)
         dinov2_save_path = os.path.join(config.EMBEDDINGS_DIR, "dinov2_embeddings.h5")
 
-        dinov2_embeddings, dinov2_paths = dinov2_embedder.embed_dataset(
-            image_paths, batch_size=args.batch_size, save_path=dinov2_save_path
-        )
-        print("✅ DINOv2 embeddings complete!")
+        if os.path.exists(dinov2_save_path):
+            print(f"Loading existing DINOv2 embeddings from {dinov2_save_path}...")
+            dinov2_embeddings, dinov2_paths, _ = DINOv2Embedder.load_embeddings(
+                dinov2_save_path
+            )
+            print(f"✅ Loaded {len(dinov2_embeddings)} DINOv2 embeddings")
+        else:
+            dinov2_embeddings, dinov2_paths = dinov2_embedder.embed_dataset(
+                image_paths, batch_size=args.batch_size, save_path=dinov2_save_path
+            )
+            print("✅ DINOv2 embeddings complete!")
 
-    # Step 4: SKIP FAISS - Use direct numpy search instead
-    print("\n" + "=" * 70)
-    print("STEP 4: SKIPPING FAISS INDEX")
-    print("Using direct numpy similarity search instead")
-    print("=" * 70)
-    print("✅ No indexing needed - embeddings ready for search!")
+    # Step 4: FAISS Indexing Experiments
+    if args.step in ["all", "index"]:
+        print("\n" + "=" * 70)
+        print("STEP 4: FAISS INDEXING EXPERIMENTS")
+        print("Comparing latency of different search methods")
+        print("=" * 70)
+
+        from indexing.faiss_indexer import FAISSIndexer
+        from embeddings.clip_embedder import CLIPEmbedder
+        import time
+        import faiss
+
+        # Load CLIP embeddings
+        clip_emb_path = os.path.join(config.EMBEDDINGS_DIR, "clip_embeddings.h5")
+        if not os.path.exists(clip_emb_path):
+            print(f"Embeddings not found at {clip_emb_path}")
+            print("Please run with --step embed_clip first")
+        else:
+            embeddings, paths, _ = CLIPEmbedder.load_embeddings(clip_emb_path)
+            print(f"Loaded {len(embeddings)} embeddings for benchmarking")
+
+            # Ensure float32
+            if embeddings.dtype != np.float32:
+                embeddings = embeddings.astype(np.float32)
+
+            # Normalize for cosine similarity
+            print("Normalizing embeddings...")
+            norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+            embeddings = embeddings / (norms + 1e-8)
+
+            results = []
+
+            # 1. Pure Numpy Search
+            print("\n--- Benchmarking Pure Numpy Search ---")
+            start_time = time.time()
+            # Run 100 random queries
+            num_queries = 100
+            np.random.seed(42)
+            query_indices = np.random.choice(
+                len(embeddings), num_queries, replace=False
+            )
+            queries = embeddings[query_indices]
+
+            for query in queries:
+                # Dot product
+                sims = np.dot(embeddings, query)
+                # Top k
+                top_k = np.argsort(sims)[-10:][::-1]
+
+            numpy_time = time.time() - start_time
+            numpy_avg = (numpy_time / num_queries) * 1000
+            print(f"Numpy Average Latency: {numpy_avg:.4f} ms")
+            results.append(("Numpy (Exact)", numpy_avg))
+
+            # 2. FAISS Index Types
+            index_types = ["Flat", "IVF", "HNSW"]
+
+            for idx_type in index_types:
+                print(f"\n--- Benchmarking FAISS {idx_type} ---")
+                try:
+                    indexer = FAISSIndexer(
+                        embedding_dim=embeddings.shape[1], index_type=idx_type
+                    )
+                    # Note: normalize=False because we already normalized above
+                    indexer.build_index(embeddings, paths, normalize=False)
+
+                    bench_res = indexer.benchmark(
+                        embeddings, k=10, num_queries=num_queries
+                    )
+                    results.append(
+                        (f"FAISS {idx_type}", bench_res["avg_latency"] * 1000)
+                    )
+
+                except Exception as e:
+                    print(f"Error benchmarking {idx_type}: {e}")
+
+            # Print Summary Table
+            print("\n" + "=" * 60)
+            print(f"{'Method':<20} | {'Latency (ms)':<15} | {'Speedup vs Numpy':<15}")
+            print("-" * 60)
+
+            numpy_baseline = results[0][1]
+            for name, latency in results:
+                speedup = numpy_baseline / latency if latency > 0 else 0
+                print(f"{name:<20} | {latency:<15.4f} | {speedup:<15.2f}x")
+            print("=" * 60)
 
     # Step 5: Grad-CAM Visualization
     if args.step in ["all", "gradcam"]:
@@ -304,17 +399,100 @@ def run_pipeline(args):
             print("Need at least 2 images for Grad-CAM demo.")
         else:
             try:
+                from visualization.gradcam import CLIPGradCAM
+                from embeddings.clip_embedder import CLIPEmbedder
+                import clip
+
                 # Load models
                 clip_model, _ = clip.load(args.clip_model, device=config.DEVICE)
                 embedder = CLIPEmbedder(model_name=args.clip_model)
                 grad_cam = CLIPGradCAM(clip_model, device=config.DEVICE)
 
-                # Generate for first pair
-                save_dir = os.path.join(config.RESULTS_DIR, "gradcam_results")
-                print(f"{image_paths[0]=}, {image_paths[-1]=}")
-                grad_cam.generate_pairwise_cam(
-                    image_paths[0], image_paths[1], embedder, save_dir=save_dir
+                # Load embeddings for similarity calculation
+                clip_emb_path = os.path.join(
+                    config.EMBEDDINGS_DIR, "clip_embeddings.h5"
                 )
+                if not os.path.exists(clip_emb_path):
+                    print("Generating temporary embeddings for selection...")
+                    embeddings, valid_paths = embedder.embed_dataset(
+                        image_paths[:100], batch_size=32
+                    )
+                else:
+                    embeddings, valid_paths, _ = CLIPEmbedder.load_embeddings(
+                        clip_emb_path
+                    )
+
+                # Normalize embeddings
+                embeddings = embeddings / (
+                    np.linalg.norm(embeddings, axis=1, keepdims=True) + 1e-8
+                )
+
+                save_dir = os.path.join(config.RESULTS_DIR, "gradcam_results")
+                os.makedirs(save_dir, exist_ok=True)
+
+                # Select 5 SIMILAR pairs
+                print("\nGenerating 5 SIMILAR pairs (High Similarity)...")
+                # Pick 5 random query indices
+                np.random.seed(42)
+                query_indices = np.random.choice(len(embeddings), 5, replace=False)
+
+                for i, query_idx in enumerate(query_indices):
+                    query_emb = embeddings[query_idx]
+
+                    # Compute similarities
+                    sims = np.dot(embeddings, query_emb)
+                    sims[query_idx] = -1  # Exclude self
+
+                    # Find most similar
+                    best_idx = np.argmax(sims)
+                    similarity = sims[best_idx]
+
+                    query_path = valid_paths[query_idx]
+                    ref_path = valid_paths[best_idx]
+
+                    output_filename = (
+                        f"gradcam_similar_{i + 1}_sim_{similarity:.2f}.jpg"
+                    )
+                    grad_cam.generate_pairwise_cam(
+                        query_path,
+                        ref_path,
+                        embedder,
+                        save_dir=save_dir,
+                        output_filename=output_filename,
+                    )
+                    print(f"  Saved {output_filename} (Sim: {similarity:.3f})")
+
+                # Select 5 DISSIMILAR pairs
+                print("\nGenerating 5 DISSIMILAR pairs (Low Similarity)...")
+                # Pick 5 new random query indices
+                query_indices_dissim = np.random.choice(
+                    len(embeddings), 5, replace=False
+                )
+
+                for i, query_idx in enumerate(query_indices_dissim):
+                    query_emb = embeddings[query_idx]
+
+                    # Compute similarities
+                    sims = np.dot(embeddings, query_emb)
+
+                    # Find least similar
+                    worst_idx = np.argmin(sims)
+                    similarity = sims[worst_idx]
+
+                    query_path = valid_paths[query_idx]
+                    ref_path = valid_paths[worst_idx]
+
+                    output_filename = (
+                        f"gradcam_dissimilar_{i + 1}_sim_{similarity:.2f}.jpg"
+                    )
+                    grad_cam.generate_pairwise_cam(
+                        query_path,
+                        ref_path,
+                        embedder,
+                        save_dir=save_dir,
+                        output_filename=output_filename,
+                    )
+                    print(f"  Saved {output_filename} (Sim: {similarity:.3f})")
 
                 grad_cam.remove_hooks()
                 print(f"✅ Grad-CAM complete! Results in {save_dir}")
@@ -336,18 +514,86 @@ def run_pipeline(args):
             print("Need at least 2 images for attention visualization.")
         else:
             try:
+                from visualization.attention_viz import AttentionVisualizer
+                from embeddings.dinov2_embedder import DINOv2Embedder
+                import matplotlib.pyplot as plt
+                import cv2
+                from PIL import Image
+
                 embedder = DINOv2Embedder(model_name=args.dinov2_model)
                 visualizer = AttentionVisualizer()
 
                 save_dir = os.path.join(config.RESULTS_DIR, "attention_results")
+                os.makedirs(save_dir, exist_ok=True)
 
-                # Single image attention
-                attn_data = embedder.extract_attention_maps(image_paths[0])
-                visualizer.visualize_attention_map(
-                    attn_data["attention_map"],
-                    image_paths[0],
-                    save_path=os.path.join(save_dir, "attention_demo.jpg"),
+                # Generate all-layer attention maps for 10 samples
+                num_samples = min(10, len(image_paths))
+                print(
+                    f"Generating all-layer attention maps for {num_samples} samples..."
                 )
+
+                for i in range(num_samples):
+                    img_path = image_paths[i]
+                    original_img = Image.open(img_path).convert("RGB")
+
+                    # Create figure: 3 rows, 5 columns
+                    # Col 0: Original (Middle)
+                    # Cols 1-4: Layers 0-11 (3x4 grid)
+                    fig, axes = plt.subplots(3, 5, figsize=(20, 12))
+
+                    # Clear all axes first and turn off axis
+                    for ax in axes.flatten():
+                        ax.axis("off")
+
+                    # Plot Original Image at (1, 0) - Middle Left
+                    axes[1, 0].imshow(original_img)
+                    axes[1, 0].set_title(
+                        "Original Image", fontsize=12, fontweight="bold"
+                    )
+
+                    # Plot Layers 0-11 in columns 1-4
+                    for layer_idx in range(12):
+                        row = layer_idx // 4
+                        col = (layer_idx % 4) + 1
+
+                        try:
+                            res = embedder.extract_attention_maps(
+                                img_path, layer_idx=layer_idx
+                            )
+                            attn_map = res["attention_map"]
+
+                            # Normalize
+                            attn_map = (attn_map - attn_map.min()) / (
+                                attn_map.max() - attn_map.min() + 1e-8
+                            )
+
+                            # Resize
+                            w, h = original_img.size
+                            attn_resized = cv2.resize(
+                                attn_map, (w, h), interpolation=cv2.INTER_CUBIC
+                            )
+
+                            # Apply colormap
+                            heatmap = plt.cm.jet(attn_resized)[:, :, :3]
+
+                            # Overlay
+                            overlay = (
+                                np.array(original_img) / 255.0 * 0.5 + heatmap * 0.5
+                            )
+
+                            axes[row, col].imshow(overlay)
+                            axes[row, col].set_title(f"Layer {layer_idx}")
+
+                        except Exception as e:
+                            print(f"Error layer {layer_idx} for image {i}: {e}")
+
+                    plt.tight_layout()
+                    save_path = os.path.join(
+                        save_dir, f"all_layers_attention_sample_{i + 1}.jpg"
+                    )
+                    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+                    plt.close()
+                    print(f"  Saved {os.path.basename(save_path)}")
 
                 print(f"✅ Attention visualization complete! Results in {save_dir}")
             except Exception as e:
@@ -362,6 +608,11 @@ def run_pipeline(args):
         print("STEP 7: DEMO SIMILARITY SEARCH (5 SAMPLES)")
         print("Using both CLIP and DINOv2 embeddings")
         print("=" * 70)
+
+        from embeddings.clip_embedder import CLIPEmbedder
+        from embeddings.dinov2_embedder import DINOv2Embedder
+        from utils.helpers import visualize_top_k_results
+        import random
 
         # Load both embeddings
         embeddings_dict = {}
@@ -433,6 +684,9 @@ def run_pipeline(args):
                     f"\n  Sample {sample_num}/{num_samples}: {os.path.basename(query_path)}"
                 )
 
+                # Time the similarity computation
+                import time
+
                 start_time = time.time()
 
                 # Compute similarities
@@ -449,7 +703,7 @@ def run_pipeline(args):
 
                 # Print timing and top 5 for brevity
                 print(f"  ⏱️  Search completed in {search_time_ms:.1f}ms")
-                print("  Top 5 matches:")
+                print(f"  Top 5 matches:")
                 for i, (path, sim) in enumerate(
                     zip(similar_paths[:5], top_similarities[:5]), 1
                 ):
@@ -467,13 +721,13 @@ def run_pipeline(args):
                     k=10,
                     include_heatmaps=False,
                 )
-                print("    ✅ Standard visualization saved")
+                print(f"    ✅ Standard visualization saved")
 
                 # Visualize this sample - Heatmap version (with region highlighting)
                 sample_heatmap_path = os.path.join(
                     samples_dir, f"sample_{sample_num}_heatmap.jpg"
                 )
-                print("    🎨 Generating heatmap with region highlighting...")
+                print(f"    🎨 Generating heatmap with region highlighting...")
                 visualize_top_k_results(
                     query_path,
                     similar_paths,
@@ -523,7 +777,7 @@ def run_pipeline(args):
                 query_indices, embeddings_dict, compute_similarities, comparison_dir
             )
 
-            print("\n  ✅ Comparison complete!")
+            print(f"\n  ✅ Comparison complete!")
             print(f"     Directory: {comparison_dir}")
             print(
                 f"     Files: comparison_sample_1.jpg ... comparison_sample_{num_samples}.jpg"
@@ -532,40 +786,40 @@ def run_pipeline(args):
         print(f"\n{'=' * 70}")
         print("ALL SEARCHES COMPLETE!")
         print(f"{'=' * 70}")
-        print("\nResults structure:")
-        print("  results/sample_searches/")
+        print(f"\nResults structure:")
+        print(f"  results/sample_searches/")
         if "clip" in embeddings_dict:
-            print("  ├── clip/")
-            print("  │   ├── sample_1_results.jpg      (standard)")
-            print("  │   ├── sample_1_heatmap.jpg      (with similar regions)")
-            print("  │   ├── sample_2_results.jpg")
-            print("  │   ├── sample_2_heatmap.jpg")
-            print("  │   ├── ...")
+            print(f"  ├── clip/")
+            print(f"  │   ├── sample_1_results.jpg      (standard)")
+            print(f"  │   ├── sample_1_heatmap.jpg      (with similar regions)")
+            print(f"  │   ├── sample_2_results.jpg")
+            print(f"  │   ├── sample_2_heatmap.jpg")
+            print(f"  │   ├── ...")
             print(f"  │   ├── sample_{num_samples}_results.jpg")
             print(f"  │   ├── sample_{num_samples}_heatmap.jpg")
             print(
                 f"  │   └── all_samples_summary.jpg   ({num_samples} samples × 10 results)"
             )
         if "dinov2" in embeddings_dict:
-            print("  ├── dinov2/")
-            print("  │   ├── sample_1_results.jpg      (standard)")
-            print("  │   ├── sample_1_heatmap.jpg      (with similar regions)")
-            print("  │   ├── sample_2_results.jpg")
-            print("  │   ├── sample_2_heatmap.jpg")
-            print("  │   ├── ...")
+            print(f"  ├── dinov2/")
+            print(f"  │   ├── sample_1_results.jpg      (standard)")
+            print(f"  │   ├── sample_1_heatmap.jpg      (with similar regions)")
+            print(f"  │   ├── sample_2_results.jpg")
+            print(f"  │   ├── sample_2_heatmap.jpg")
+            print(f"  │   ├── ...")
             print(f"  │   ├── sample_{num_samples}_results.jpg")
             print(f"  │   ├── sample_{num_samples}_heatmap.jpg")
             print(
                 f"  │   └── all_samples_summary.jpg   ({num_samples} samples × 10 results)"
             )
         if len(embeddings_dict) == 2:
-            print("  └── comparison/")
-            print("      ├── comparison_sample_1.jpg")
-            print("      ├── comparison_sample_2.jpg")
-            print("      ├── ...")
+            print(f"  └── comparison/")
+            print(f"      ├── comparison_sample_1.jpg")
+            print(f"      ├── comparison_sample_2.jpg")
+            print(f"      ├── ...")
             print(f"      └── comparison_sample_{num_samples}.jpg")
         print(f"\n🎉 Generated {num_samples} sample searches for each embedding type!")
-        print("   Heatmap versions show highlighted similar regions!")
+        print(f"   Heatmap versions show highlighted similar regions!")
 
     print("\n" + "=" * 70)
     print("PIPELINE COMPLETE!")
@@ -589,6 +843,7 @@ def main():
             "gradcam",
             "attention",
             "demo",
+            "index",
         ],
         help="Pipeline step to run (note: no index step in this version)",
     )

@@ -43,7 +43,10 @@ const Gallery = ({ results, selectedResult, onSelectResult }) => {
               </Box>
               <Box sx={{ p: 1, bgcolor: '#fff' }}>
                 <Typography variant="caption" display="block" align="center" fontWeight="bold">
-                  Sim: {result.score.toFixed(3)}
+                  {result.score % 1 === 0 && result.score <= 12 
+                    ? `Layer ${Math.round(result.score)}`
+                    : `Sim: ${result.score.toFixed(3)}`
+                  }
                 </Typography>
               </Box>
             </Paper>

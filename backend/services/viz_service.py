@@ -1,8 +1,10 @@
 import logging
 import os
 import sys
+import uuid
 
 import numpy as np
+import torch
 from PIL import Image
 from torchvision import transforms
 
@@ -16,6 +18,8 @@ from data.data_preprocessing import DataPreprocessor  # noqa: E402
 from embeddings.clip_embedder import CLIPEmbedder  # noqa: E402
 from embeddings.dinov2_embedder import DINOv2Embedder  # noqa: E402
 from visualization.similarity_heatmap import SimilarityHeatmapGenerator  # noqa: E402
+from visualization.gradcam import CLIPGradCAM  # noqa: E402
+from visualization.attention_viz import AttentionVisualizer  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -29,6 +33,7 @@ class VizService:
         self.device = self.config.DEVICE
         self.heatmap_generators = {}  # model_name -> generator
         self.search_embedders = {}  # model_name -> embedder
+        self.attention_visualizer = None
         # Cache for image paths to ensure consistency across requests
         # This replaces the paths from the H5 file which might be stale (absolute paths from another machine)
         self.cached_image_paths = None
@@ -58,6 +63,14 @@ class VizService:
     def load_model(self, model_name):
         """Explicitly load model and embeddings"""
         logger.info(f"Loading model resources for: {model_name}")
+
+        if model_name == "gradcam":
+            # Grad-CAM relies on CLIP model and embeddings
+            return self.load_model("clip")
+        
+        if model_name == "attention":
+            # Attention relies on DINOv2 model
+            return self.load_model("dinov2")
 
         # 0. Refresh image paths from filesystem to ensure validity
         if self.cached_image_paths is None:
@@ -99,13 +112,6 @@ class VizService:
         if model_name == "dinov2":
             model_name = "dinov2_vitb14"
         elif model_name == "clip":
-            # For now, we use DINOv2 for heatmap/patch interaction even if CLIP is selected for search
-            # unless we implement a CLIP patch extractor.
-            # The user asked for support for both, but getting patch features from CLIP is tricky without changing the class.
-            # Let's assume for the visualization we prefer DINOv2's spatial resolution.
-            # Or we can try to create a CLIP generator.
-            # For this iteration, let's fallback to DINOv2 for the patch interaction to ensure it works reliably.
-            # We can document this or try to add CLIP patch support later.
             model_name = "dinov2_vitb14"
 
         if model_name not in self.heatmap_generators:
@@ -127,6 +133,11 @@ class VizService:
             else:
                 raise ValueError(f"Unknown model type: {model_type}")
         return self.search_embedders[model_type]
+    
+    def get_attention_visualizer(self):
+        if self.attention_visualizer is None:
+            self.attention_visualizer = AttentionVisualizer(self.config)
+        return self.attention_visualizer
 
     def compute_similarity_matrix(self, query_path, result_path, model_name="dinov2"):
         """
@@ -137,6 +148,89 @@ class VizService:
             grid_size: Tuple (h, w) of the patch grid
             dimensions: Dict with 'query_patches', 'result_patches' counts
         """
+        if model_name == "attention":
+             # For Attention model, we want to return the actual attention map for the specified layer
+             # The result_path contains the filename layer_X.jpg
+             try:
+                 filename = os.path.basename(result_path)
+                 # Format is layer_{idx}.jpg
+                 if "layer_" in filename:
+                     layer_part = filename.split("layer_")[1]
+                     layer_idx = int(layer_part.split(".")[0])
+                 else:
+                     # Default to last layer if can't parse
+                     layer_idx = -1
+                 
+                 embedder = self.get_embedder("dinov2")
+                 res = embedder.extract_attention_maps(query_path, layer_idx=layer_idx)
+                 attn_map = res["attention_map"] # [H, W] numpy array
+                 
+                 flat_attn = attn_map.flatten().tolist()
+                 grid_size = int(np.sqrt(len(flat_attn)))
+                 
+                 # Broadcast to create a fake "matrix" where every row is the same Attention Map
+                 # This ensures that "max" reduction in frontend gives back the Attention Map
+                 matrix = [flat_attn for _ in range(len(flat_attn))]
+                 
+                 return {
+                     "matrix": matrix,
+                     "shape": [len(flat_attn), len(flat_attn)],
+                     "grid_size": grid_size,
+                 }
+             except Exception as e:
+                 logger.error(f"Error computing attention matrix: {e}")
+                 # Fallback to zeros
+                 dummy_size = 16 * 16
+                 return {
+                     "matrix": [0.0] * dummy_size,
+                     "shape": [dummy_size, dummy_size],
+                     "grid_size": 16,
+                 }
+
+        if model_name == "gradcam":
+            # Special handling for Grad-CAM
+            # Use CLIP embedder to get the model and process images
+            embedder = self.get_embedder("clip")
+            
+            # Initialize Grad-CAM with the CLIP model from embedder
+            grad_cam = CLIPGradCAM(embedder.model, device=self.device)
+            
+            try:
+                # 1. Get query embedding (target for CAM)
+                query_emb_np = embedder.embed_image(query_path)
+                query_emb_tensor = (
+                    torch.from_numpy(query_emb_np).unsqueeze(0).to(self.device)
+                )
+
+                # 2. Prepare result image tensor (input for CAM)
+                result_img = Image.open(result_path).convert("RGB")
+                result_tensor = embedder.preprocess(result_img).unsqueeze(
+                    0
+                )  # [1, 3, 224, 224]
+
+                # 3. Generate CAM on Result image, targeting Query embedding
+                cam = grad_cam.generate_cam(
+                    result_tensor, target_embedding=query_emb_tensor
+                )
+
+                flat_cam = cam.flatten().tolist()
+                grid_size = int(np.sqrt(len(flat_cam)))
+
+                if grid_size * grid_size != len(flat_cam):
+                    logger.warning(f"CAM shape {cam.shape} is not square")
+
+                # Broadcast to create a fake "matrix" where every row is the same CAM
+                # This ensures that "max" reduction in frontend gives back the CAM
+                matrix = [flat_cam for _ in range(len(flat_cam))]
+
+                return {
+                    "matrix": matrix,
+                    "shape": [len(flat_cam), len(flat_cam)],
+                    "grid_size": grid_size,
+                }
+            finally:
+                grad_cam.remove_hooks()
+
         generator = self.get_generator(model_name)
 
         # Extract features
@@ -220,14 +314,15 @@ class VizService:
         Search for similar images using global embeddings.
         Excludes results with similarity > 0.99 to avoid returning the query image itself.
         """
+        if model_name == "gradcam":
+            model_name = "clip"
+
         embedder = self.get_embedder(model_name)
 
         # Embed query
         query_embedding = embedder.embed_image(query_path)
 
         # Load all embeddings
-        # We need to know where they are stored.
-        # Assuming standard location from config/main.py
         emb_dir = self.config.EMBEDDINGS_DIR
         emb_file = (
             "clip_embeddings.h5" if model_name == "clip" else "dinov2_embeddings.h5"
@@ -235,13 +330,10 @@ class VizService:
         emb_path = os.path.join(emb_dir, emb_file)
 
         if not os.path.exists(emb_path):
-            # If no embeddings, maybe return empty or error
             logger.warning(f"Embeddings file not found: {emb_path}")
             return []
 
         # Load embeddings
-        # This is inefficient to do on every request, but for a demo it's fine.
-        # In production, cache this.
         if model_name == "clip":
             all_embeddings, _, _ = CLIPEmbedder.load_embeddings(emb_path)
         else:
@@ -253,12 +345,10 @@ class VizService:
 
         image_paths = self.cached_image_paths
 
-        # Sanity check
         if len(image_paths) == 0:
             logger.error("No image paths found! Check processed data directory.")
             return []
 
-        # Check alignment
         if len(image_paths) != len(all_embeddings):
             logger.warning(
                 f"Count mismatch: {len(image_paths)} files vs {len(all_embeddings)} embeddings. "
@@ -266,35 +356,23 @@ class VizService:
             )
             min_len = min(len(image_paths), len(all_embeddings))
             all_embeddings = all_embeddings[:min_len]
-            # Note: we don't truncate image_paths list itself here as we index into it,
-            # but we should be careful about logic.
 
         # Compute similarity
-        # Normalize query
         query_norm = query_embedding / (np.linalg.norm(query_embedding) + 1e-8)
-
-        # Normalize all
         all_norms = np.linalg.norm(all_embeddings, axis=1, keepdims=True)
         all_normalized = all_embeddings / (all_norms + 1e-8)
-
-        # Dot product
         sims = np.dot(all_normalized, query_norm)
 
-        # Filter out similarities > 0.99 (likely the same image)
-        # But we still want to return top_k results
-        # So we might need to get more than top_k initially
-        top_indices = np.argsort(sims)[::-1]  # Get all sorted indices descending
+        top_indices = np.argsort(sims)[::-1]
 
         results = []
         count = 0
         for idx in top_indices:
-            # Stop if we have enough results
             if count >= top_k:
                 break
 
             sim_score = float(sims[idx])
 
-            # Skip if similarity is effectively 1.0 (self-match)
             if sim_score > 0.9999:
                 continue
 
@@ -306,4 +384,54 @@ class VizService:
                     f"Index {idx} out of bounds for image_paths list (len={len(image_paths)})"
                 )
 
+        return results
+
+    def generate_layer_attention_results(self, query_path):
+        """
+        Generate attention maps for all layers of the DINOv2 model.
+        Returns results in a format compatible with frontend gallery.
+        """
+        embedder = self.get_embedder("dinov2")
+        visualizer = self.get_attention_visualizer()
+        
+        # Directory to save temporary attention maps
+        # We use a unique ID for this batch to avoid collisions if multiple users (though local demo)
+        session_id = str(uuid.uuid4())[:8]
+        temp_dir = os.path.join(project_root, "data", "temp_attention", session_id)
+        os.makedirs(temp_dir, exist_ok=True)
+        
+        results = []
+        
+        # Layers 0 to 11
+        for layer_idx in range(12):
+            try:
+                # Extract attention map
+                res = embedder.extract_attention_maps(
+                    query_path, layer_idx=layer_idx
+                )
+                attn_map = res["attention_map"]
+                
+                # Save visualization
+                filename = f"layer_{layer_idx}.jpg"
+                save_path = os.path.join(temp_dir, filename)
+                
+                # Use visualizer to save overlay
+                visualizer.visualize_attention_map(
+                    attn_map,
+                    query_path,
+                    save_path=save_path,
+                    alpha=0.5,
+                    colormap="jet"
+                )
+                
+                # Create result entry
+                # score = layer_idx (to display "Sim: 0.000" -> "Layer 0")
+                results.append({
+                    "path": save_path,
+                    "score": float(layer_idx) 
+                })
+                
+            except Exception as e:
+                logger.error(f"Error generating attention for layer {layer_idx}: {e}")
+        
         return results
