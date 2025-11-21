@@ -38,30 +38,32 @@ const Sidebar = ({
 
   return (
     <Paper
-      elevation={3}
+      elevation={0}
+      square
       sx={{
         width: 300,
         height: "100vh",
         display: "flex",
         flexDirection: "column",
-        p: 2,
+        p: 3,
         overflowY: "auto",
-        backgroundColor: "#f5f5f5",
+        backgroundColor: "#F2EBE3", // Warm Beige
+        borderRight: "1px solid rgba(74, 59, 50, 0.08)",
       }}
     >
       <Typography
         variant="h6"
         gutterBottom
-        sx={{ fontWeight: "bold", color: "#1976d2" }}
+        sx={{ mb: 3, fontWeight: 700, color: "text.primary" }}
       >
-        Search Settings
+        Visual Search
       </Typography>
 
       {/* Model Selection */}
       <FormControl fullWidth sx={{ mb: 3 }} size="small">
         <InputLabel
           id="model-select-label"
-          sx={{ bgcolor: "#f5f5f5", px: 0.5 }}
+          sx={{ bgcolor: "#F2EBE3", px: 0.5, color: "text.secondary" }}
         >
           Methods
         </InputLabel>
@@ -99,7 +101,11 @@ const Sidebar = ({
           {/* View Mode Toggle - Hide for Grad-CAM and Attention */}
           {selectedModel !== "gradcam" && selectedModel !== "attention" && (
             <>
-              <Typography variant="subtitle2" gutterBottom>
+              <Typography
+                variant="subtitle2"
+                gutterBottom
+                sx={{ mt: 2, mb: 1 }}
+              >
                 Attention Mode
               </Typography>
               <ToggleButtonGroup
@@ -116,15 +122,19 @@ const Sidebar = ({
             </>
           )}
 
-          <Divider sx={{ mb: 2 }} />
+          <Divider sx={{ mb: 3, opacity: 0.6 }} />
 
           {/* Upload */}
           <Button
             component="label"
-            variant="contained"
+            variant="outlined" // Changed to outlined for cleaner look
             startIcon={<CloudUploadIcon />}
             fullWidth
-            sx={{ mb: 3 }}
+            sx={{
+              mb: 3,
+              bgcolor: "background.paper",
+              borderColor: "rgba(74, 59, 50, 0.2)",
+            }}
           >
             Upload Image
             <input
@@ -136,7 +146,7 @@ const Sidebar = ({
           </Button>
 
           {/* Sample Images */}
-          <Typography variant="subtitle2" gutterBottom>
+          <Typography variant="subtitle2" gutterBottom sx={{ mb: 1 }}>
             Sample Images
           </Typography>
           <ImageList cols={3} rowHeight={80} gap={8}>
@@ -145,8 +155,15 @@ const Sidebar = ({
                 key={index}
                 sx={{
                   cursor: "pointer",
-                  border: "1px solid #ddd",
-                  "&:hover": { opacity: 0.8, borderColor: "#1976d2" },
+                  borderRadius: 2,
+                  overflow: "hidden",
+                  border: "1px solid transparent",
+                  transition: "all 0.2s",
+                  "&:hover": {
+                    opacity: 0.8,
+                    transform: "translateY(-2px)",
+                    borderColor: "primary.main",
+                  },
                 }}
                 onClick={() => onSelectSample(path)}
               >

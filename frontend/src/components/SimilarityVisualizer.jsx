@@ -108,170 +108,259 @@ const SimilarityVisualizer = ({
       sx={{
         display: "flex",
         flexDirection: "column",
-        gap: 2,
+        gap: 4,
         alignItems: "center",
         width: "100%",
+        mt: 2,
       }}
     >
-      {/* Query Image Area */}
-      <Paper
-        elevation={3}
-        sx={{ p: 1, position: "relative", width: "fit-content" }}
+      <Box
+        sx={{
+          display: "flex",
+          gap: 4,
+          justifyContent: "center",
+          flexWrap: "wrap",
+        }}
       >
-        <Typography variant="subtitle2" align="center">
-          Query Image
-        </Typography>
-        <Box sx={{ position: "relative", width: 300, height: 300 }}>
-          <img
-            src={getImageUrl(queryPath)}
-            alt="Query"
-            style={{
-              width: "100%",
-              height: "100%",
-              objectFit: "contain",
-              display: "block",
-            }}
-          />
-
-          {/* Query Interaction Grid (Only relevant in Pairwise mode) */}
-          {viewMode === "pairwise" && (
-            <Box
-              sx={{
-                position: "absolute",
-                top: 0,
-                left: 0,
-                right: 0,
-                bottom: 0,
-                display: "grid",
-                gridTemplateColumns: `repeat(${gridSize}, 1fr)`,
-                gridTemplateRows: `repeat(${gridSize}, 1fr)`,
-                cursor: "crosshair",
-              }}
-              onMouseLeave={() => setHoveredQueryIdx(null)}
-            >
-              {Array.from({ length: gridSize * gridSize }).map((_, idx) => (
-                <div
-                  key={idx}
-                  onMouseEnter={() => setHoveredQueryIdx(idx)}
-                  style={{
-                    border:
-                      hoveredQueryIdx === idx ? "1px solid white" : "none",
-                    backgroundColor:
-                      hoveredQueryIdx === idx
-                        ? "rgba(255, 255, 255, 0.3)"
-                        : "transparent",
-                  }}
-                />
-              ))}
-            </Box>
-          )}
-        </Box>
-        {viewMode === "pairwise" && (
-          <Typography
-            variant="caption"
-            display="block"
-            align="center"
-            color="text.secondary"
-          >
-            Hover patches here to see similarity on Result
-          </Typography>
-        )}
-      </Paper>
-
-      {/* Result Image Area */}
-      <Paper
-        elevation={3}
-        sx={{ p: 1, position: "relative", width: "fit-content" }}
-      >
-        <Typography
-          variant="subtitle2"
-          align="center"
-          sx={{ minHeight: "1.5rem" }}
+        {/* Query Image Area */}
+        <Box
+          sx={{
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            gap: 1,
+          }}
         >
-          Result Image
-          {hoveredResultIdx !== null &&
-            heatmapData &&
-            heatmapData[hoveredResultIdx] !== undefined && (
-              <span style={{ marginLeft: 10, fontWeight: "bold" }}>
-                {model === "attention" ? "Attn" : "Sim"}:{" "}
-                {heatmapData[hoveredResultIdx].toFixed(3)}
-              </span>
-            )}
-        </Typography>
-
-        <Box sx={{ position: "relative", width: 300, height: 300 }}>
-          {loading ? (
-            <Box
-              sx={{
-                display: "flex",
-                height: "100%",
-                alignItems: "center",
-                justifyContent: "center",
-              }}
-            >
-              <CircularProgress />
-            </Box>
-          ) : (
-            <>
+          <Typography
+            variant="subtitle2"
+            align="center"
+            sx={{
+              fontWeight: 600,
+              textTransform: "uppercase",
+              letterSpacing: "0.05em",
+            }}
+          >
+            Query Image
+          </Typography>
+          <Paper
+            elevation={0}
+            sx={{
+              p: 1,
+              position: "relative",
+              width: "fit-content",
+              border: "1px solid rgba(74, 59, 50, 0.16)",
+              borderRadius: 2,
+              bgcolor: "background.paper",
+            }}
+          >
+            <Box sx={{ position: "relative", width: 300, height: 300 }}>
               <img
-                src={getImageUrl(resultPath)}
-                alt="Result"
+                src={getImageUrl(queryPath)}
+                alt="Query"
                 style={{
                   width: "100%",
                   height: "100%",
                   objectFit: "contain",
                   display: "block",
+                  borderRadius: 4,
                 }}
               />
 
-              {/* Interactive Layer for Result Image */}
-              <Box
-                sx={{
-                  position: "absolute",
-                  top: 0,
-                  left: 0,
-                  right: 0,
-                  bottom: 0,
-                  display: "grid",
-                  gridTemplateColumns: `repeat(${gridSize}, 1fr)`,
-                  gridTemplateRows: `repeat(${gridSize}, 1fr)`,
-                  opacity: 0.6, // Apply opacity to the whole grid if it contains colors
-                }}
-                onMouseLeave={() => setHoveredResultIdx(null)}
-              >
-                {heatmapData &&
-                  heatmapData.map((val, idx) => (
+              {/* Query Interaction Grid (Only relevant in Pairwise mode) */}
+              {viewMode === "pairwise" && (
+                <Box
+                  sx={{
+                    position: "absolute",
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    display: "grid",
+                    gridTemplateColumns: `repeat(${gridSize}, 1fr)`,
+                    gridTemplateRows: `repeat(${gridSize}, 1fr)`,
+                    cursor: "crosshair",
+                  }}
+                  onMouseLeave={() => setHoveredQueryIdx(null)}
+                >
+                  {Array.from({ length: gridSize * gridSize }).map((_, idx) => (
                     <div
                       key={idx}
-                      onMouseEnter={() => setHoveredResultIdx(idx)}
+                      onMouseEnter={() => setHoveredQueryIdx(idx)}
                       style={{
-                        backgroundColor: colorScale
-                          ? colorScale(val)
-                          : `rgba(255,0,0,${val})`,
                         border:
-                          hoveredResultIdx === idx ? "1px solid white" : "none",
+                          hoveredQueryIdx === idx ? "1px solid white" : "none",
+                        backgroundColor:
+                          hoveredQueryIdx === idx
+                            ? "rgba(255, 255, 255, 0.3)"
+                            : "transparent",
                       }}
                     />
                   ))}
-              </Box>
-            </>
+                </Box>
+              )}
+            </Box>
+          </Paper>
+          {viewMode === "pairwise" && (
+            <Typography
+              variant="caption"
+              display="block"
+              align="center"
+              color="text.secondary"
+              sx={{ mt: 1, maxWidth: 300 }}
+            >
+              Hover patches here to see similarity on Result
+            </Typography>
           )}
         </Box>
-      </Paper>
+
+        {/* Result Image Area */}
+        <Box
+          sx={{
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            gap: 1,
+          }}
+        >
+          <Typography
+            variant="subtitle2"
+            align="center"
+            sx={{
+              minHeight: "1.5rem",
+              fontWeight: 600,
+              textTransform: "uppercase",
+              letterSpacing: "0.05em",
+            }}
+          >
+            Result Image
+            {hoveredResultIdx !== null &&
+              heatmapData &&
+              heatmapData[hoveredResultIdx] !== undefined && (
+                <span
+                  style={{
+                    marginLeft: 10,
+                    fontWeight: "bold",
+                    color: "#D97757",
+                  }}
+                >
+                  {model === "attention" ? "Attn" : "Sim"}:{" "}
+                  {heatmapData[hoveredResultIdx].toFixed(3)}
+                </span>
+              )}
+          </Typography>
+
+          <Paper
+            elevation={0}
+            sx={{
+              p: 1,
+              position: "relative",
+              width: "fit-content",
+              border: "1px solid rgba(74, 59, 50, 0.16)",
+              borderRadius: 2,
+              bgcolor: "background.paper",
+            }}
+          >
+            <Box sx={{ position: "relative", width: 300, height: 300 }}>
+              {loading ? (
+                <Box
+                  sx={{
+                    display: "flex",
+                    height: "100%",
+                    alignItems: "center",
+                    justifyContent: "center",
+                  }}
+                >
+                  <CircularProgress />
+                </Box>
+              ) : (
+                <>
+                  <img
+                    src={getImageUrl(resultPath)}
+                    alt="Result"
+                    style={{
+                      width: "100%",
+                      height: "100%",
+                      objectFit: "contain",
+                      display: "block",
+                      borderRadius: 4,
+                    }}
+                  />
+
+                  {/* Interactive Layer for Result Image */}
+                  <Box
+                    sx={{
+                      position: "absolute",
+                      top: 0,
+                      left: 0,
+                      right: 0,
+                      bottom: 0,
+                      display: "grid",
+                      gridTemplateColumns: `repeat(${gridSize}, 1fr)`,
+                      gridTemplateRows: `repeat(${gridSize}, 1fr)`,
+                      opacity: 0.6, // Apply opacity to the whole grid if it contains colors
+                    }}
+                    onMouseLeave={() => setHoveredResultIdx(null)}
+                  >
+                    {heatmapData &&
+                      heatmapData.map((val, idx) => (
+                        <div
+                          key={idx}
+                          onMouseEnter={() => setHoveredResultIdx(idx)}
+                          style={{
+                            backgroundColor: colorScale
+                              ? colorScale(val)
+                              : `rgba(255,0,0,${val})`,
+                            border:
+                              hoveredResultIdx === idx
+                                ? "1px solid white"
+                                : "none",
+                          }}
+                        />
+                      ))}
+                  </Box>
+                </>
+              )}
+            </Box>
+          </Paper>
+        </Box>
+      </Box>
 
       {/* Legend */}
-      <Box sx={{ display: "flex", alignItems: "center", gap: 1, width: 300 }}>
-        <Typography variant="caption">Low</Typography>
+      <Paper
+        elevation={0}
+        sx={{
+          display: "flex",
+          alignItems: "center",
+          gap: 2,
+          width: 320,
+          p: 1.5,
+          borderRadius: 2,
+          border: "1px solid rgba(74, 59, 50, 0.08)",
+          bgcolor: "#F2EBE3",
+        }}
+      >
+        <Typography
+          variant="caption"
+          sx={{ fontWeight: 600, color: "text.secondary" }}
+        >
+          Low
+        </Typography>
         <div
           style={{
             flex: 1,
-            height: 10,
+            height: 8,
+            borderRadius: 4,
             background:
               "linear-gradient(to right, purple, blue, green, yellow)",
           }}
         />
-        <Typography variant="caption">High</Typography>
-      </Box>
+        <Typography
+          variant="caption"
+          sx={{ fontWeight: 600, color: "text.secondary" }}
+        >
+          High
+        </Typography>
+      </Paper>
     </Box>
   );
 };
