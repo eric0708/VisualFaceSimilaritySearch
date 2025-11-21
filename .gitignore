@@ -2,3 +2,5 @@ data/processed/
 data/raw/
 results/
 **/__pycache__/**
+temp_uploads/
+*.ipynb*.h5

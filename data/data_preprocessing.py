@@ -114,6 +114,7 @@ class DataPreprocessor:
                 break
         
         print(f"Found {len(image_paths)} images.")
+        image_paths.sort()
         return image_paths
     
     def get_transform(self, for_model: str = 'clip') -> transforms.Compose:
