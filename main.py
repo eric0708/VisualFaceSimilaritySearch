@@ -279,12 +279,84 @@ def run_pipeline(args):
             )
             print("✅ DINOv2 embeddings complete!")
     
-    # Step 4: SKIP FAISS - Use direct numpy search instead
-    print("\n" + "="*70)
-    print("STEP 4: SKIPPING FAISS INDEX")
-    print("Using direct numpy similarity search instead")
-    print("="*70)
-    print("✅ No indexing needed - embeddings ready for search!")
+    # Step 4: FAISS Indexing Experiments
+    if args.step in ['all', 'index']:
+        print("\n" + "="*70)
+        print("STEP 4: FAISS INDEXING EXPERIMENTS")
+        print("Comparing latency of different search methods")
+        print("="*70)
+        
+        from faiss_indexer import FAISSIndexer
+        from clip_embedder import CLIPEmbedder
+        import time
+        import faiss
+        
+        # Load CLIP embeddings
+        clip_emb_path = os.path.join(config.EMBEDDINGS_DIR, 'clip_embeddings.h5')
+        if not os.path.exists(clip_emb_path):
+            print(f"Embeddings not found at {clip_emb_path}")
+            print("Please run with --step embed_clip first")
+        else:
+            embeddings, paths, _ = CLIPEmbedder.load_embeddings(clip_emb_path)
+            print(f"Loaded {len(embeddings)} embeddings for benchmarking")
+            
+            # Ensure float32
+            if embeddings.dtype != np.float32:
+                embeddings = embeddings.astype(np.float32)
+            
+            # Normalize for cosine similarity
+            print("Normalizing embeddings...")
+            norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+            embeddings = embeddings / (norms + 1e-8)
+            
+            results = []
+            
+            # 1. Pure Numpy Search
+            print("\n--- Benchmarking Pure Numpy Search ---")
+            start_time = time.time()
+            # Run 100 random queries
+            num_queries = 100
+            np.random.seed(42)
+            query_indices = np.random.choice(len(embeddings), num_queries, replace=False)
+            queries = embeddings[query_indices]
+            
+            for query in queries:
+                # Dot product
+                sims = np.dot(embeddings, query)
+                # Top k
+                top_k = np.argsort(sims)[-10:][::-1]
+            
+            numpy_time = time.time() - start_time
+            numpy_avg = (numpy_time / num_queries) * 1000
+            print(f"Numpy Average Latency: {numpy_avg:.4f} ms")
+            results.append(("Numpy (Exact)", numpy_avg))
+            
+            # 2. FAISS Index Types
+            index_types = ['Flat', 'IVF', 'HNSW']
+            
+            for idx_type in index_types:
+                print(f"\n--- Benchmarking FAISS {idx_type} ---")
+                try:
+                    indexer = FAISSIndexer(embedding_dim=embeddings.shape[1], index_type=idx_type)
+                    # Note: normalize=False because we already normalized above
+                    indexer.build_index(embeddings, paths, normalize=False) 
+                    
+                    bench_res = indexer.benchmark(embeddings, k=10, num_queries=num_queries)
+                    results.append((f"FAISS {idx_type}", bench_res['avg_latency'] * 1000))
+                    
+                except Exception as e:
+                    print(f"Error benchmarking {idx_type}: {e}")
+            
+            # Print Summary Table
+            print("\n" + "="*60)
+            print(f"{'Method':<20} | {'Latency (ms)':<15} | {'Speedup vs Numpy':<15}")
+            print("-" * 60)
+            
+            numpy_baseline = results[0][1]
+            for name, latency in results:
+                speedup = numpy_baseline / latency if latency > 0 else 0
+                print(f"{name:<20} | {latency:<15.4f} | {speedup:<15.2f}x")
+            print("="*60)
     
     # Step 5: Grad-CAM Visualization
     if args.step in ['all', 'gradcam']:
@@ -662,7 +734,7 @@ def main():
         type=str,
         default='all',
         choices=['all', 'preprocess', 'embed_clip', 'embed_dinov2', 
-                'gradcam', 'attention', 'demo'],
+                'gradcam', 'attention', 'demo', 'index'],
         help='Pipeline step to run (note: no index step in this version)'
     )
     

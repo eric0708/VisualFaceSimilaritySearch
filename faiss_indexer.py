@@ -4,6 +4,11 @@ Builds efficient similarity search indices using FAISS
 Team Member: Jin-Lian Ho
 """
 import os
+
+# Set environment variables to prevent FAISS hangs on macOS
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
+os.environ['OMP_NUM_THREADS'] = '1'
+
 import time
 import numpy as np
 import faiss
@@ -51,11 +56,17 @@ class FAISSIndexer:
         """
         assert embeddings.shape[0] == len(image_paths), "Mismatch between embeddings and paths"
         
+        # Ensure float32
+        if embeddings.dtype != np.float32:
+            print("Converting embeddings to float32...")
+            embeddings = embeddings.astype(np.float32)
+        
         self.image_paths = image_paths
         n_vectors = embeddings.shape[0]
         
         # Normalize embeddings for cosine similarity
         if normalize:
+            print("Normalizing embeddings...")
             faiss.normalize_L2(embeddings)
         
         print(f"Building {self.index_type} index for {n_vectors} vectors...")
@@ -64,6 +75,7 @@ class FAISSIndexer:
         if self.index_type == "Flat":
             # Exact search using L2 distance (after normalization, equivalent to cosine)
             self.index = faiss.IndexFlatL2(self.embedding_dim)
+            print("Adding vectors to Flat index...")
             self.index.add(embeddings)
             
         elif self.index_type == "IVF":
@@ -73,8 +85,9 @@ class FAISSIndexer:
             self.index = faiss.IndexIVFFlat(quantizer, self.embedding_dim, nlist)
             
             # Train the index
-            print(f"Training IVF index with {nlist} clusters...")
+            print(f"Training IVF index with {nlist} clusters (this may take a moment)...")
             self.index.train(embeddings)
+            print("Adding vectors to IVF index...")
             self.index.add(embeddings)
             self.index.nprobe = self.config.FAISS_NPROBE  # Number of clusters to visit
             
@@ -84,6 +97,7 @@ class FAISSIndexer:
             self.index = faiss.IndexHNSWFlat(self.embedding_dim, M)
             self.index.hnsw.efConstruction = 40  # Controls index construction quality
             self.index.hnsw.efSearch = 32  # Controls search quality
+            print("Building HNSW graph (this may take a while)...")
             self.index.add(embeddings)
             
         else:
