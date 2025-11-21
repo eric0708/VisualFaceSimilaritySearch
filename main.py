@@ -305,11 +305,73 @@ def run_pipeline(args):
                 embedder = CLIPEmbedder(model_name=args.clip_model)
                 grad_cam = CLIPGradCAM(clip_model, device=config.DEVICE)
                 
-                # Generate for first pair
+                # Load embeddings for similarity calculation
+                clip_emb_path = os.path.join(config.EMBEDDINGS_DIR, 'clip_embeddings.h5')
+                if not os.path.exists(clip_emb_path):
+                    print("Generating temporary embeddings for selection...")
+                    embeddings, valid_paths = embedder.embed_dataset(image_paths[:100], batch_size=32)
+                else:
+                    embeddings, valid_paths, _ = CLIPEmbedder.load_embeddings(clip_emb_path)
+                
+                # Normalize embeddings
+                embeddings = embeddings / (np.linalg.norm(embeddings, axis=1, keepdims=True) + 1e-8)
+                
                 save_dir = os.path.join(config.RESULTS_DIR, 'gradcam_results')
-                grad_cam.generate_pairwise_cam(
-                    image_paths[0], image_paths[1], embedder, save_dir=save_dir
-                )
+                os.makedirs(save_dir, exist_ok=True)
+                
+                # Select 5 SIMILAR pairs
+                print("\nGenerating 5 SIMILAR pairs (High Similarity)...")
+                # Pick 5 random query indices
+                np.random.seed(42)
+                query_indices = np.random.choice(len(embeddings), 5, replace=False)
+                
+                for i, query_idx in enumerate(query_indices):
+                    query_emb = embeddings[query_idx]
+                    
+                    # Compute similarities
+                    sims = np.dot(embeddings, query_emb)
+                    sims[query_idx] = -1  # Exclude self
+                    
+                    # Find most similar
+                    best_idx = np.argmax(sims)
+                    similarity = sims[best_idx]
+                    
+                    query_path = valid_paths[query_idx]
+                    ref_path = valid_paths[best_idx]
+                    
+                    output_filename = f"gradcam_similar_{i+1}_sim_{similarity:.2f}.jpg"
+                    grad_cam.generate_pairwise_cam(
+                        query_path, ref_path, embedder, 
+                        save_dir=save_dir, 
+                        output_filename=output_filename
+                    )
+                    print(f"  Saved {output_filename} (Sim: {similarity:.3f})")
+
+                # Select 5 DISSIMILAR pairs
+                print("\nGenerating 5 DISSIMILAR pairs (Low Similarity)...")
+                # Pick 5 new random query indices
+                query_indices_dissim = np.random.choice(len(embeddings), 5, replace=False)
+                
+                for i, query_idx in enumerate(query_indices_dissim):
+                    query_emb = embeddings[query_idx]
+                    
+                    # Compute similarities
+                    sims = np.dot(embeddings, query_emb)
+                    
+                    # Find least similar
+                    worst_idx = np.argmin(sims)
+                    similarity = sims[worst_idx]
+                    
+                    query_path = valid_paths[query_idx]
+                    ref_path = valid_paths[worst_idx]
+                    
+                    output_filename = f"gradcam_dissimilar_{i+1}_sim_{similarity:.2f}.jpg"
+                    grad_cam.generate_pairwise_cam(
+                        query_path, ref_path, embedder, 
+                        save_dir=save_dir, 
+                        output_filename=output_filename
+                    )
+                    print(f"  Saved {output_filename} (Sim: {similarity:.3f})")
                 
                 grad_cam.remove_hooks()
                 print(f"✅ Grad-CAM complete! Results in {save_dir}")

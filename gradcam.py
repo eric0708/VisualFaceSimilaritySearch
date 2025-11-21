@@ -138,9 +138,39 @@ class GradCAM:
         image = Image.open(image_path).convert('RGB')
         image = np.array(image)
         
+        # Debug
+        # print(f"DEBUG: CAM shape: {cam.shape}, dtype: {cam.dtype}")
+        # print(f"DEBUG: Image shape: {image.shape}, dtype: {image.dtype}")
+        
+        if cam.size == 0:
+             print("⚠️  Grad-CAM Error: CAM is empty in visualize_cam")
+             return image
+
         # Resize CAM to match image size
         h, w = image.shape[:2]
-        cam_resized = cv2.resize(cam, (w, h))
+        
+        # Ensure cam is float32
+        cam = cam.astype(np.float32)
+        
+        try:
+            # Use Cubic interpolation for smoother upsampling of the 7x7 grid
+            cam_resized = cv2.resize(cam, (w, h), interpolation=cv2.INTER_CUBIC)
+            
+            # Apply stronger Gaussian Blur to create larger, smoother regions
+            # Increased kernel size from 21 to 45
+            cam_resized = cv2.GaussianBlur(cam_resized, (45, 45), 0)
+            
+            # Re-normalize after blurring
+            cam_resized = (cam_resized - cam_resized.min()) / (cam_resized.max() - cam_resized.min() + 1e-8)
+            
+            # Apply Gamma Correction (gamma < 1.0) to boost weaker activations
+            # This makes the "red" regions appear larger and more connected
+            cam_resized = np.power(cam_resized, 0.6)
+            
+        except Exception as e:
+            print(f"⚠️  Grad-CAM Error in cv2.resize: {e}")
+            print(f"   CAM shape: {cam.shape}, dtype: {cam.dtype}")
+            return image
         
         # Apply colormap
         cmap = cm.get_cmap(colormap)
@@ -160,7 +190,8 @@ class GradCAM:
     def generate_pairwise_cam(self, query_image_path: str,
                              reference_image_path: str,
                              model_embedder,
-                             save_dir: Optional[str] = None) -> Dict[str, np.ndarray]:
+                             save_dir: Optional[str] = None,
+                             output_filename: Optional[str] = None) -> Dict[str, np.ndarray]:
         """
         Generate Grad-CAM for pairwise similarity
         
@@ -169,6 +200,7 @@ class GradCAM:
             reference_image_path: Path to reference image
             model_embedder: Embedder object (CLIP or DINOv2)
             save_dir: Directory to save visualizations
+            output_filename: Optional filename for the comparison image
             
         Returns:
             Dictionary with CAMs and visualizations
@@ -193,20 +225,25 @@ class GradCAM:
         if save_dir:
             os.makedirs(save_dir, exist_ok=True)
             
-            # Save query CAM
-            query_vis_path = os.path.join(save_dir, 'query_cam.jpg')
-            query_vis = self.visualize_cam(query_image_path, query_cam, 
-                                          save_path=query_vis_path)
-            results['visualization'] = query_vis
-            
-            # Save side-by-side comparison
-            self._save_comparison(query_image_path, reference_image_path,
-                                query_cam, save_dir)
+            if output_filename:
+                # Save only the comparison with the specified filename
+                self._save_comparison(query_image_path, reference_image_path,
+                                    query_cam, save_dir, filename=output_filename)
+            else:
+                # Default behavior: save both query cam and comparison
+                query_vis_path = os.path.join(save_dir, 'query_cam.jpg')
+                query_vis = self.visualize_cam(query_image_path, query_cam, 
+                                              save_path=query_vis_path)
+                results['visualization'] = query_vis
+                
+                # Save side-by-side comparison
+                self._save_comparison(query_image_path, reference_image_path,
+                                    query_cam, save_dir)
         
         return results
     
     def _save_comparison(self, query_path: str, ref_path: str,
-                        cam: np.ndarray, save_dir: str):
+                        cam: np.ndarray, save_dir: str, filename: str = 'comparison.jpg'):
         """Save side-by-side comparison"""
         fig, axes = plt.subplots(1, 3, figsize=(15, 5))
         
@@ -229,7 +266,7 @@ class GradCAM:
         axes[2].axis('off')
         
         plt.tight_layout()
-        plt.savefig(os.path.join(save_dir, 'comparison.jpg'), 
+        plt.savefig(os.path.join(save_dir, filename), 
                    bbox_inches='tight', dpi=150)
         plt.close()
 
@@ -239,8 +276,10 @@ class CLIPGradCAM(GradCAM):
     
     def __init__(self, clip_model, device: str = None):
         """Initialize with CLIP model"""
-        # For CLIP ViT, use the last transformer block
-        target_layer = clip_model.visual.transformer.resblocks[-1]
+        # For CLIP ViT, use the penultimate transformer block
+        # The last block's output spatial tokens are unused (only CLS is used),
+        # so their gradients are zero. We use the block before it.
+        target_layer = clip_model.visual.transformer.resblocks[-2]
         super().__init__(clip_model.visual, target_layer, device)
         self.full_model = clip_model
     
@@ -270,16 +309,31 @@ class CLIPGradCAM(GradCAM):
         gradients = self.gradients
         activations = self.activations
         
+        if gradients is None or activations is None:
+            print("⚠️  Grad-CAM Error: Gradients or activations are None.")
+            print(f"   Gradients: {type(gradients)}, Activations: {type(activations)}")
+            return np.zeros((224, 224))
+
         # MPS compatibility: move to CPU for processing
         if self.device == "mps":
             gradients = gradients.cpu()
             activations = activations.cpu()
-        
-        if activations.dim() == 3:  # [batch, seq_len, dim]
+            
+        if activations.dim() == 3:
+            # Check for [seq_len, batch, dim] format (common in PyTorch transformers)
+            # If shape is [50, 1, 768], it's likely [seq_len, batch, dim]
+            if activations.shape[1] == 1 and activations.shape[0] > 1:
+                activations = activations.permute(1, 0, 2)
+                gradients = gradients.permute(1, 0, 2)
+
             # Reshape to spatial format (approximate)
             b, n, c = activations.shape
             h = w = int(np.sqrt(n - 1))  # Exclude CLS token
             
+            if h == 0:
+                print(f"⚠️  Grad-CAM Error: Spatial dimensions are 0. Seq len: {n}")
+                return np.zeros((224, 224))
+
             # Remove CLS token
             activations = activations[:, 1:, :]
             gradients = gradients[:, 1:, :]
@@ -288,21 +342,34 @@ class CLIPGradCAM(GradCAM):
             activations = activations.reshape(b, h, w, c).permute(0, 3, 1, 2)
             gradients = gradients.reshape(b, h, w, c).permute(0, 3, 1, 2)
         
-        # Compute weights (on CPU for MPS compatibility)
-        weights = gradients.mean(dim=(2, 3), keepdim=True)
+        # LayerCAM Implementation
+        # 1. Positive gradients only (features that positively contribute)
+        # This removes inhibitory signals which can cause noise in the heatmap
+        gradients = torch.clamp(gradients, min=0)
         
-        # Weighted combination
-        cam = (weights * activations).sum(dim=1, keepdim=True)
+        # 2. Element-wise weighting (HiResCAM style)
+        cam = (gradients * activations).sum(dim=1, keepdim=True)
         
-        # ReLU (use torch.clamp for MPS compatibility)
+        # 3. ReLU on result
         cam = torch.clamp(cam, min=0)
         
-        # Normalize
+        if cam.numel() == 0:
+             print("⚠️  Grad-CAM Error: CAM tensor is empty.")
+             return np.zeros((224, 224))
+
+        # Normalize with outlier clipping
         cam_min = cam.min()
         cam_max = cam.max()
-        if cam_max > cam_min:
-            cam = (cam - cam_min) / (cam_max - cam_min + 1e-8)
         
+        if cam_max > cam_min:
+            # Min-max normalization
+            cam = (cam - cam_min) / (cam_max - cam_min + 1e-8)
+            
+            # REMOVED: Aggressive thresholding (was cam[cam < 0.3] = 0)
+            # We want to see larger regions, even if they have lower activation.
+            # The positive gradient constraint (LayerCAM) already filters out 
+            # negative/inhibitory signals, so we can trust the remaining signal more.
+            
         return cam.squeeze().numpy()
 
 
